@@ -1,0 +1,21 @@
+plan attr — Get or set ticket attributes (selector)
+
+Usage:
+  plan 5 attr NAME                       Get attribute value
+  plan 5 attr NAME get                   Same as above
+  plan 5 attr NAME add VAL               Append to attribute (links)
+  plan 5 attr NAME del                   Delete attribute
+  plan 5 attr NAME replace --force VAL   Replace attribute value
+  plan 5 -r attr NAME replace --force VAL
+                                          Set on ticket and descendants
+
+Selectors and verbs can appear in either order:
+  plan 5 attr NAME get    ─┐
+  plan get 5 attr NAME    ─┘ equivalent
+
+Attributes are key-value pairs stored under each ticket (status,
+assignee, links, estimate, or any custom name).
+
+Examples:
+  plan 5 attr assignee
+  plan 1 -r attr status replace --force open

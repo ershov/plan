@@ -1,0 +1,17 @@
+plan mod — Modify ticket via DSL expression
+
+Usage:
+  plan N mod EXPR
+  plan N ~ EXPR
+  plan N -r mod EXPR             Apply to ticket and all descendants
+  plan N -r FILTER mod EXPR      Apply to matching descendants
+
+  '~' is a shorthand for 'mod'. EXPR is evaluated in a sandboxed
+  namespace with access to ticket attributes and mutator functions.
+
+Examples:
+  plan 5 ~ 'set(assignee="alice")'
+  plan 1 -r ~ 'set(status="in-progress")'
+  plan 1 -r 'type=="Bug"' ~ 'set(status="open")'
+
+See 'plan help dsl' for DSL expression syntax.

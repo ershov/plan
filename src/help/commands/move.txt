@@ -1,0 +1,34 @@
+plan move — Move and/or reorder tickets (verb)
+
+Usage:
+  plan SELECTOR move first          Move to first among siblings
+  plan SELECTOR move last           Move to last among siblings
+  plan SELECTOR move first DEST     Move as first child of DEST
+  plan SELECTOR move last DEST      Move as last child of DEST
+  plan SELECTOR move before DEST    Move before sibling DEST
+  plan SELECTOR move after DEST     Move after sibling DEST
+
+A direction (first, last, before, after) is required.
+DEST can be 0 to target the root level.
+
+Selectors can appear before or after 'move', but must come
+before the direction keyword:
+  plan 5 move after 7          Selector before move
+  plan move 5 after 7          Selector after move
+
+Multiple targets are moved in selection order, each placed
+sequentially at the requested position.
+
+The same values can be used with the 'move' attribute in
+set(move="...") or in the ticket's attributes in the file.
+
+Examples:
+  plan 5 move first 3          Move 5 as first child of 3
+  plan 5 move last 3           Move 5 as last child of 3
+  plan 5 move before 7         Move 5 before sibling 7
+  plan 5 move first            Move 5 to first among current siblings
+  plan 5 move first 0          Move 5 to first at root
+  plan 5 7 9 move first        Place 5, 7, 9 first in order
+  plan 5 7 move after 3        Place 5 after 3, then 7 after 5
+  plan move 5 after 7          Selector after move keyword
+  plan 5 ~ 'set(move="first")' Move via DSL

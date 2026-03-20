@@ -1,0 +1,19 @@
+plan comment — Access or add comments on a ticket (selector)
+
+Usage:
+  plan 5 comment             List comments
+  plan 5 comment get         Same as above
+  plan 5 comment add TEXT    Add a new comment
+  plan 5 comment add -e      Open editor to add comment
+  plan add TEXT 5 comment    Same as above (either order)
+  plan 5 -r comment add TEXT Add comment to ticket and all descendants
+
+Selectors and verbs can appear in either order.
+
+Examples:
+  plan 5 comment
+  plan 5 comment add "Needs review"
+  plan add "Needs review" 5 comment
+  plan 1 -r comment add "Sprint 5"
+  plan 5 comment add                 Open editor to add comment
+  plan 5 comment add -e              Same as above

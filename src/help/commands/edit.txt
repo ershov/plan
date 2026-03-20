@@ -1,0 +1,22 @@
+plan edit — Edit in external editor
+
+Usage:
+  plan edit ID                   Edit single ticket
+  plan edit ID -r                Edit entire subtree in one editor
+
+Opens the ticket or node content in $EDITOR for interactive editing.
+Saves changes back to the plan file on exit. ID can be a ticket
+number, section name, or any node identifier.
+
+When editing recursively (-r), you can add new tickets by writing
+* ## headers without an ID or with {#newXXX} placeholders.
+New ticket IDs, timestamps, and status are auto-assigned.
+
+Flags:
+  -r, --recursive    Edit the entire subtree (ticket + children) recursively.
+
+Examples:
+  plan edit 5                    Edit ticket #5
+  plan edit 5 -r                 Edit ticket #5 and all children
+  plan edit description          Edit project description section
+  plan edit project              Edit the project root node

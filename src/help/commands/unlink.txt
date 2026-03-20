@@ -1,0 +1,13 @@
+plan unlink — Remove links between tickets (verb)
+
+Usage:
+  plan ID unlink TARGET          Remove ALL links to TARGET
+  plan ID unlink TYPE TARGET     Remove specific link type
+  plan ID unlink all TARGET      Explicit: remove all links
+
+  TYPE is one of: blocked, blocking, related, derived, derived-from,
+  caused, caused-by, all. Default: all.
+
+Examples:
+  plan 5 unlink 3                Remove all links between #5 and #3
+  plan 5 unlink blocked 3        Remove only blocked link to #3

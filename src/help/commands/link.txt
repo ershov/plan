@@ -1,0 +1,16 @@
+plan link — Link tickets together (verb)
+
+Usage:
+  plan ID link TARGET            Link as related (default)
+  plan ID link TYPE TARGET       Link with specific type
+  plan ID... link TYPE TARGET    Link multiple sources
+
+  TYPE is one of: blocked, blocking, related, derived, derived-from,
+  caused, caused-by. Default: related.
+
+  Mirror links are maintained automatically.
+
+Examples:
+  plan 5 link 3                  #5 related to #3
+  plan 5 link blocked 3          #5 blocked by #3
+  plan 1 2 3 link blocked 5      Link #1, #2, #3 as blocked by #5

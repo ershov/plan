@@ -1,0 +1,45 @@
+plan list — List and query tickets (verb)
+
+Usage:
+  plan list                   List all tickets
+  plan 5 list                 Show ticket 5 in list format
+  plan list 5                 Same as above
+  plan 5 -r list              Show ticket 5 and all descendants
+  plan list ready              Show only tickets ready for work
+  plan list is_active          Show active tickets (excludes deferred)
+  plan list order             Show tickets in execution order
+  plan [selectors] list [flags]
+  plan list [flags] [selectors]
+
+Selectors and verbs can appear in either order.
+Output always shows tree-depth indentation.
+
+Flags:
+  -r, --recursive   Recursive (include all descendants)
+  -q EXPR         Query expression (usually implicit; bool → filter, list/int → selector)
+  --format EXPR   Format output with DSL expression
+  -n N            Limit to first N results
+  --title PAT     Filter by title substring
+  --text PAT      Filter by body text substring
+  --attr EXPR     Filter by attribute expression
+  -p, --parent    Include ancestor path to the target ticket
+  order           Verb argument: topological sort by execution order
+
+DSL filter properties:
+  is_open         Status is active or deferred (not closed)
+  is_active       Status is active (not deferred or closed)
+  ready           is_active + no active blockers or children
+
+Examples:
+  plan list
+  plan 5 list
+  plan 5 -r list
+  plan -r list
+  plan list ready
+  plan list is_active
+  plan list order
+  plan 'status == "open"' list
+  plan -p is_open -r list            Filter with tree context
+  plan list --format 'f"{indent}#{id} {title}"'
+
+See 'plan help dsl' for DSL expression syntax.

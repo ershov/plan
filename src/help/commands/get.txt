@@ -1,0 +1,16 @@
+plan get — Print content (default verb)
+
+Usage:
+  plan N get                     Print ticket content
+  plan get N                     Same as above
+  plan N -r get                  Print full subtree (markdown tree view)
+  plan N -r EXPR get              Print matching descendants individually
+
+'get' is the default verb — if no verb is specified, get is used.
+Selectors and verbs can appear in either order.
+
+Examples:
+  plan 5
+  plan 5 -r get
+  plan get 5 -r
+  plan 1 -r 'status=="open"' get

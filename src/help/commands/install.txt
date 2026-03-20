@@ -1,0 +1,15 @@
+plan install — Install plan binary, Claude Code plugin, and CLAUDE.md
+
+Usage:
+  plan install local    Install into current directory / project
+  plan install user     Install into ~/.local/bin and ~/.claude
+
+What gets installed:
+  Binary    'local': ./plan, 'user': ~/.local/bin/plan
+            Skipped if plan is already on PATH.
+  Plugin    'local': .claude/plugins/claude-plan/
+            'user': ~/.claude/plugins/claude-plan/
+            Registered in the corresponding settings.json.
+  CLAUDE.md 'local': ./CLAUDE.md
+            'user': ~/.claude/CLAUDE.md
+            Appends task tracking instructions. Skipped if already present.

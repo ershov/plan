@@ -1,0 +1,12 @@
+plan replace — Replace content
+
+Usage:
+  plan N replace --force TEXT
+  plan N -r replace --force TEXT   Replace on ticket and all descendants
+
+Replaces the body text of a ticket or section. Requires --force.
+Text can be a literal string, @filepath, or - for stdin.
+
+Examples:
+  plan 5 replace --force "New body text"
+  plan 1 -r replace --force @notes.txt

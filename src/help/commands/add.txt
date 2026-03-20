@@ -1,0 +1,20 @@
+plan add — Append content (smart append)
+
+Usage:
+  plan N add TEXT
+  plan N + TEXT
+  plan N add -e                  Open editor to append text
+  plan N -r add TEXT             Append to ticket and all descendants
+
+Appends to the ticket body text. '+' is a shorthand for 'add'.
+Text can be a literal string, @filepath, - for stdin, or -e for editor.
+
+Flags:
+  -e, --edit      Open $EDITOR for text input
+
+Examples:
+  plan 5 add "Another paragraph"
+  plan 5 + "Quick note"
+  plan 1 -r add "Sprint 5 note"
+  plan 5 add                     Open editor to append text
+  plan 5 add -e                  Same as above

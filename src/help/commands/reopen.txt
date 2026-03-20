@@ -1,0 +1,12 @@
+plan reopen — Reopen a closed ticket (verb)
+
+Usage:
+  plan SELECTOR reopen
+  plan SELECTOR -r reopen
+
+  Sets status to "open".
+
+Examples:
+  plan 5 reopen
+  plan 5 7 9 reopen
+  plan 1 -r reopen

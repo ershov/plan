@@ -1,0 +1,7 @@
+plan resolve — Resolve merge conflicts
+
+Usage:
+  plan resolve
+
+Parses git merge conflict markers in the plan file and attempts
+to produce a clean merged document.

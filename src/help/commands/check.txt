@@ -1,0 +1,8 @@
+plan check — Validate the plan document
+
+Usage:
+  plan check
+
+Checks for structural issues: duplicate IDs, broken links,
+orphaned comments, and other inconsistencies. Exits with a
+non-zero status if errors are found.

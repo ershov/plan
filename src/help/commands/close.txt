@@ -1,0 +1,18 @@
+plan close — Close ticket with a resolution (verb)
+
+Usage:
+  plan SELECTOR close [RESOLUTION]
+  plan SELECTOR -r close [RESOLUTION]
+
+  Sets status to RESOLUTION (default: done).
+
+Bare integer IDs after 'close' are treated as selectors, not
+as the resolution:
+  plan close 5 done              Same as: plan 5 close done
+
+Examples:
+  plan 5 close
+  plan 5 close duplicate
+  plan close 1 2 done            Selectors after verb
+  plan 1 -r 'status == "open"' close done
+  plan is_open close "won't do"

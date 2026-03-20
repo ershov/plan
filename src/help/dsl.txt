@@ -1,0 +1,71 @@
+
+DSL expressions:
+
+  Namespace variables (available in -q, --format, mod):
+    id          Ticket number (int)
+    title       Ticket title (str)
+    text        Body text (str)
+    status      Status value (str)
+    is_open     True if status is active or deferred (bool)
+                  active:   open, in-progress, assigned, blocked,
+                            reviewing, testing
+                  deferred: backlog, deferred, future, someday,
+                            wishlist, paused, on-hold
+                  Unset status is open. Any other status is closed.
+    is_active   True if status is active (not deferred or closed) (bool)
+    ready       True if is_active and no active blockers or children (bool)
+    move        Ephemeral attribute for positioning. In set():
+                "first [N]", "last [N]", "before N", "after N",
+                or bare ticket ID. Not available in filters.
+    assignee    Assignee name (str)
+    depth       Nesting level, 0 = top-level (int)
+    indent      "  " * depth (str)
+    parent      Parent ticket ID (int), 0 if root
+    children    Child tickets (list)
+    links       Link dict, e.g. {"blocked": [3]}
+    Any other attribute on the ticket is also available.
+
+  Helper functions:
+    parent_of(N)             Parent ticket ID of #N (0 if root; 0 = virtual root)
+    is_descendant_of(P)      True if current ticket is a descendant of #P
+    is_descendant_of(P, C)   True if #C is a descendant of #P
+    children_of(N)           List of child ticket IDs of #N (0 = top-level)
+    children_of(N, True)     All descendant IDs recursively
+    children()               Returns list of direct children of current ticket
+    children(recursive=True) Returns all descendants recursively
+
+  Builtins:
+    len, any, all, min, max, sorted, int, str, float,
+    True, False, None, file (reads a file path)
+
+  Filter (-q EXPR, usually implicit):
+    Evaluated per-ticket. Return truthy to include.
+    Example: plan 'status == "open" and assignee == "alice"' list
+
+  Format (--format EXPR):
+    Evaluated per-ticket. Result is printed.
+    Example: --format 'f"{indent}#{id} [{status}] {title}"'
+
+  Mutator functions (mod / ~ only):
+    set(key=val, ...)   Set attributes. Keys: title, text, or any attr.
+    add(key=val, ...)   Append to composite attrs:
+                          text   — appends a line to body
+                          links  — appends link string (e.g. "blocked:#3")
+                          comment — creates a new comment with the value
+    delete(name, ...)   Remove named attributes.
+    link(type, id)      Add a link (with mirror). Types: blocked,
+                          blocking, related, derived, derived-from,
+                          caused, caused-by.
+    unlink(type, id)    Remove a link (with mirror).
+
+  Composition:
+    Chain with commas: set(status="done"), add(text="note")
+
+  Examples:
+    plan 5 ~ 'set(status="in-progress", assignee="alice")'
+    plan 5 ~ 'set(move="first")'
+    plan 5 ~ 'set(move="first 3")'     Move under #3 as first child
+    plan 5 ~ 'set(move="after 3")'     Move to be a sibling after #3
+    plan 5 ~ 'add(text="Extra detail")'
+    plan 5 ~ 'link("blocked", 3)'
+    plan 5 ~ 'delete("estimate")'

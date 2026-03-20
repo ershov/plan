@@ -1,0 +1,18 @@
+plan status — Set ticket status (verb)
+
+Usage:
+  plan SELECTOR status STATUS
+  plan SELECTOR -r status STATUS
+
+  STATUS is any string (e.g. open, in-progress, done, planned).
+
+Bare integer IDs after 'status' are treated as selectors, not
+as the status value:
+  plan status 5 in-progress      Same as: plan 5 status in-progress
+
+Examples:
+  plan 5 status in-progress
+  plan 5 7 9 status planned
+  plan status 1 2 in-progress    Selectors after verb
+  plan is_open status in-progress
+  plan 1 -r 'assignee == "alice"' status in-progress

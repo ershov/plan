@@ -1,0 +1,61 @@
+plan create — Create a new ticket (command)
+
+Usage:
+  plan create [parent] [--quiet] EXPR
+  plan create [parent] [--quiet] -
+  plan create [parent] [-e]
+
+  EXPR is a keyword expression: title is required; other attributes
+  are optional. Use '-' to read a template or bulk markdown from stdin
+  (same format as the editor template). Use '-e' to open $EDITOR with
+  a template. Prints the new ticket number on success.
+
+  When input (from stdin or editor) contains * ## headers,
+  tickets are created in bulk from the markdown hierarchy. Use
+  {#newXXX} placeholders for cross-references between new tickets.
+  IDs, timestamps, and status are auto-assigned. Explicit numeric
+  IDs are not allowed in create mode.
+
+Arguments:
+  parent          Optional parent ticket ID (bare integer) for nesting
+  EXPR            Keyword expression (evaluated via set())
+  -               Read template or bulk markdown from stdin
+
+Flags:
+  -e, --edit      Open $EDITOR for text input
+  --quiet         Suppress printing the new ticket number
+
+The move attribute accepts positional expressions that may also
+reparent the ticket: "first [N]", "last [N]", "before N", "after N".
+"first N" / "last N" place under parent N (0 for root).
+"before N" / "after N" place as sibling of N.
+A bare ticket ID reparents as last child.
+
+Examples:
+  plan create 'title="Fix login bug"'
+  plan create 'title="Sub-task", status="open"'
+  plan create 5 'title="Child task"'
+  plan create 'title="Urgent", move="first"'
+  plan create --quiet 'title="Silent create"'
+  echo '## My task' | plan create -        Create from template via stdin
+  plan create                              Open editor to create ticket
+  plan create -e                           Same as above
+  plan create 5 -e                         Create child of #5 in editor
+  plan create -e 'title="Bug"'            Open editor with title pre-filled
+
+Bulk creation (markdown input — tickets execute in creation order):
+  plan create [parent] - <<'EOF'
+  * ## Epic: Auth
+    Auth system.
+    * ## JWT
+      JWT middleware.
+  * ## Epic: Database
+    Schema and migrations.
+  EOF
+
+  Use {#placeholder} IDs for cross-branch dependencies:
+  * ## Set up DB {#db}
+  * ## Build API
+        links: blocked:#db
+
+See 'plan help dsl' for DSL expression syntax.

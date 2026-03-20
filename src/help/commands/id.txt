@@ -1,0 +1,23 @@
+plan id — Select any node by its #id (selector)
+
+Usage:
+  plan id NAME                  Get node content (implicit get)
+  plan id NAME get              Same as above
+  plan id NAME -r               Recursive subtree view
+  plan -p id NAME               Show with ancestor chain
+  plan id NAME list             List children
+  plan id NAME add TEXT          Append text
+  plan id NAME replace --force TEXT
+                                Replace content
+
+NAME is any #id in the document: section names (description,
+metadata), ticket numbers (3), or compound ids (1:comment:2).
+For numeric IDs, 'plan id 3' is equivalent to 'plan 3'.
+
+Examples:
+  plan id description
+  plan id description add "New paragraph"
+  plan id 3                     Same as 'plan 3'
+  plan id 1:comment:2
+  plan id 3 -r get
+  plan -p id 3

@@ -1,0 +1,500 @@
+#!/bin/bash
+# plzf — fzf-based TUI for plan tickets
+
+set -uo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+
+die() { echo "$@" >&2; exit 1; }
+command -v fzf >/dev/null 2>&1 || die 'plzf requires fzf. Install: sudo apt-get install fzf'
+command -v plan >/dev/null 2>&1 || {
+  # Try same directory as this script
+  SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  if [[ -x "$SCRIPT_DIR/plan.py" ]]; then
+    plan() { "$SCRIPT_DIR/plan.py" "$@"; }
+  else
+    die 'plzf requires plan in PATH or same directory'
+  fi
+}
+
+# Detect pager: bat/batcat (with markdown), or $PAGER, or less
+if command -v batcat >/dev/null 2>&1; then
+  _pager() { batcat --language=md --style=plain --paging=always "$@"; }
+elif command -v bat >/dev/null 2>&1; then
+  _pager() { bat --language=md --style=plain --paging=always "$@"; }
+else
+  _pager() { ${PAGER:-less} "$@"; }
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: plzf [selectors] [filters]
+
+  Arguments are passed verbatim to plan as selectors and filters.
+  -p (parent context) is always implied.
+
+Examples:
+  plzf                    Browse all tickets
+  plzf 5                  Browse ticket #5 and direct children
+  plzf 5 -r               Browse ticket #5 and all descendants
+  plzf -q is_active       Browse only active tickets
+  plzf -q 'assignee == "alice"'
+
+  --help, -h   Show this help.
+EOF
+}
+
+# Extract ticket ID from a fzf list line like "  #5    [open] Title"
+# Also accepts bare numeric IDs for direct --function calls.
+_parse_id() {
+  local input="$1"
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    echo "$input"
+  else
+      echo "$input" | perl -nE '/\#(\d++)/ and print($1),exit'
+  fi
+}
+
+# Read base args from PLZF_ARGS state file into an array.
+# Usage: local args; args=($(_base_args))
+_base_args() {
+  if [[ -s "${PLZF_ARGS:-/dev/null}" ]]; then
+    cat "$PLZF_ARGS"
+  fi
+}
+
+# --- _fn_list: generate fzf input lines ---
+_fn_list() {
+  local scope depth
+  scope="$(cat "$PLZF_STATE" 2>/dev/null)"
+  depth="$(cat "$PLZF_DEPTH" 2>/dev/null)"
+
+  # Build plan command: base args + scope as additional selector + -p
+  local plan_args=()
+  while IFS= read -r arg; do
+    [[ -n "$arg" ]] && plan_args+=("$arg")
+  done < <(_base_args)
+
+  if [[ -n "$scope" ]]; then
+    plan_args+=("is_descendant_of($scope)" "$scope")
+  fi
+  plan_args+=("-p")
+
+  #local raw=$(plan "${plan_args[@]}" list --format 'f"""{indent}{"▼" if children() else "#"}{id} [{status}] {title}"""') || return 1
+  local raw
+  raw=$(plan "${plan_args[@]}" list --format 'f"""{indent}#{id} {"▼" if children() else ""}[{status}] {title}"""') || return 1
+  #local raw=$(plan "${plan_args[@]}" list --format 'f"""{indent}#{id} [{status}] {title}"""') || return 1
+
+  # Prepend Project line (id=0) only at global scope
+  if [[ -z "$scope" ]]; then
+    raw=$(printf 'Project\n%s' "$raw")
+  fi
+
+  local hscroll
+  hscroll=$(cat "${PLZF_HSCROLL:-/dev/null}" 2>/dev/null)
+  hscroll=${hscroll:-0}
+
+  # Filter by depth, apply horizontal scroll, prepend hidden #ID field.
+  # fzf uses --with-nth 2.. for display. Typing resets scroll to 0 (change binding).
+  echo "$raw" | perl -ne '
+    BEGIN { $depth = shift; $off = shift; $ch = $off ? "<" : ""; $off += 0; $base = -1 }
+    if ($depth ne "") {
+      /^( *)/; $lvl = length($1) / 2;
+      $base = $lvl if $base < 0;
+      next if $lvl > $base + $depth;
+    }
+    chomp;
+    /^\s*+#(\d++)\s*+/ and $id = $1 or $id = 0;
+    $visible = $ch . substr($_, $off);
+    print "#$id\t$visible\n";
+  ' "$depth" "$hscroll"
+}
+
+# --- _fn_preview: side-by-side preview ---
+_fn_preview() {
+  local id; id=$(_parse_id "$1")
+  [[ -z "$id" ]] && return 0
+  if [[ "$id" == "0" ]]; then
+    plan project get
+    return
+  fi
+  local children
+  children=$(plan "$id" -r -p list --format 'f"{indent}#{id} [{status}] {title}"' 2>/dev/null | tail -n +2)
+
+  if [[ -z "$children" ]]; then
+    plan "$id" get
+  else
+    local h=${FZF_PREVIEW_LINES:-40}
+    local w=${FZF_PREVIEW_COLUMNS:-80}
+    perl -Mutf8 -E '
+      use open ":std", ":encoding(UTF-8)";
+      $h = $ARGV[0]; $w = $ARGV[1];
+      open F1, "<", $ARGV[2] or die "open left: $!";
+      open F2, "<", $ARGV[3] or die "open right: $!";
+      if ($w > 90 && !$ENV{PLZF_PREVIEW_DOWN}) {
+        $w1 = int($w/3)-2; $w2 = $w-$w1-3;
+        while (!eof(F1) || !eof(F2)) {
+          $s1 = <F1> // ""; $s2 = <F2> // "";
+          chomp $s1; chomp $s2;
+          #printf "%-${w1}.${w1}s │ %s\n", $s1, substr($s2,0,$w2);
+          printf "%-${w1}.${w1}s │ %s\n", $s1, $s2;
+        }
+      } else {
+        $h1 = 0;
+        for (1 .. int($h / 4)) {
+          print(scalar(<F1>) // last);
+          $h1 = $_;
+        }
+        #eof(F1) or print "   ...(more)...   ";
+        #say "─"x$w;
+        $ch = eof(F1) ? "~" : ".";
+        say $ch x $w;
+        $h2 = $h - $h1 - 1;
+        while (!eof(F2)) {
+          print(scalar(<F2>));
+        }
+      }
+    ' "$h" "$w" \
+      <(echo "$children") \
+      <(plan "$id" get)
+  fi
+}
+
+# --- Callback functions ---
+_fn_readkey() {
+  local key rest char
+
+  read -rsn1 key
+  if [[ $key == $'\e' ]]; then
+    rest=""
+    while read -rsn1 -t 1 char; do
+      rest+="$char"
+      [[ $char =~ [a-zA-Z~] ]] && break
+    done
+    key+="$rest"
+  fi
+  echo "$key"
+}
+_fn_view() {
+  local id; id=$(_parse_id "$1")
+  if [[ "$id" == "0" ]]; then
+    plan project get | _pager
+  else
+    plan "$id" get ${2:+"$2"} | _pager
+  fi
+}
+_fn_down()     { local id; id=$(_parse_id "$1"); echo -n "$id" > "$PLZF_STATE"; }
+_fn_up()       {
+  local scope; scope="$(cat "$PLZF_STATE" 2>/dev/null)"
+  [[ -z "$scope" ]] && return 0
+  local parent; parent=$(plan "$scope" list --format 'f"{parent}"' 2>/dev/null)
+  if [[ "$parent" == "0" || -z "$parent" ]]; then
+    echo -n "" > "$PLZF_STATE"
+  else
+    echo -n "$parent" > "$PLZF_STATE"
+  fi
+}
+_fn_expand()   {
+  local depth; depth="$(cat "$PLZF_DEPTH" 2>/dev/null)"
+  [[ -z "$depth" ]] && return 0
+  # Find max depth in full (unfiltered) list
+  local scope; scope="$(cat "$PLZF_STATE" 2>/dev/null)"
+  local eflags=()
+  while IFS= read -r arg; do
+    [[ -n "$arg" ]] && eflags+=("$arg")
+  done < <(_base_args)
+  if [[ -n "$scope" ]]; then eflags+=("is_descendant_of($scope)"); fi
+  eflags+=("-p")
+  local max_depth
+  max_depth=$(plan "${eflags[@]}" list --format 'f"{depth}"' 2>/dev/null | \
+    perl -ne 'chomp; $max = $_ if $_ > $max; END { print $max // 0 }')
+  # Make max_depth relative to scope
+  local scope_depth=0
+  if [[ -n "$scope" ]]; then
+    scope_depth=$(plan "$scope" list --format 'f"{depth}"' 2>/dev/null || echo 0)
+  fi
+  max_depth=$((max_depth - scope_depth))
+  depth=$((depth + 1))
+  if [[ $depth -gt $max_depth ]]; then
+    echo -n "" > "$PLZF_DEPTH"
+  else
+    echo -n "$depth" > "$PLZF_DEPTH"
+  fi
+}
+_fn_collapse() {
+  local depth; depth="$(cat "$PLZF_DEPTH" 2>/dev/null)"
+  if [[ -z "$depth" ]]; then
+    depth=1
+  elif [[ "$depth" -le 0 ]]; then
+    return 0
+  else
+    depth=$((depth - 1))
+  fi
+  echo -n "$depth" > "$PLZF_DEPTH"
+}
+_fn_scroll_right() {
+  local h; h=$(cat "${PLZF_HSCROLL:-/dev/null}" 2>/dev/null); h=${h:-0}
+  echo -n $((h + 8)) > "$PLZF_HSCROLL"
+}
+_fn_scroll_left() {
+  local h; h=$(cat "${PLZF_HSCROLL:-/dev/null}" 2>/dev/null); h=${h:-0}
+  h=$((h - 8)); [[ $h -lt 0 ]] && h=0
+  echo -n "$h" > "$PLZF_HSCROLL"
+}
+# Extract IDs from multiple fzf lines, skipping id=0 (project)
+_parse_ids() {
+  printf '%s\n' "$@" | perl -nE '
+    chomp; /^\d+$/ ? ($_ ne "0" and say $_) : (/\#(\d++)/ and $1 ne "0" and say $1)
+  '
+}
+_fn_close()    { local ids; ids=($(_parse_ids "$@")); [[ ${#ids[@]} -gt 0 ]] && plan "${ids[@]}" close 2>/dev/null; }
+_fn_reopen()   { local ids; ids=($(_parse_ids "$@")); [[ ${#ids[@]} -gt 0 ]] && plan "${ids[@]}" reopen 2>/dev/null; }
+_fn_edit() {
+  local id; id=$(_parse_id "$1")
+  if [[ "$id" == "0" ]]; then
+    plan edit project
+  else
+    plan edit "$id" ${2:+"$2"}
+  fi
+}
+_fn_status() {
+  local header
+  header="$(perl -E 'print join qq{\n}, map {(split /\t/)[1]} @ARGV' "$@")"
+  local ids; ids=($(_parse_ids "$@"))
+  [[ ${#ids[@]} -gt 0 ]] || return 0
+
+  # All known statuses (from plan help dsl), grouped: active, deferred, closed
+  local known="open
+in-progress
+assigned
+blocked
+reviewing
+testing
+backlog
+deferred
+future
+someday
+wishlist
+paused
+on-hold
+done
+wontfix"
+  # Add any custom statuses from the plan file not already in the list
+  local existing
+  existing=$(plan list -r --format 'f"{status}"' 2>/dev/null | sort -u | grep -v '^$')
+  local statuses
+  statuses=$(printf '%s\n%s' "$known" "$existing" | perl -ne 'chomp; print "$_\n" unless $seen{$_}++')
+
+  local choice
+  # TODO: use --print-query for fzf?
+  choice=$(echo "$statuses"$'\ncustom...' | \
+    fzf --layout=reverse-list --prompt='status > ' \
+    --header "$header" \
+    --no-select-1 --exit-0 --cycle --no-info --height $(( 15 + ${#ids[@]} )) )
+  [[ -z "$choice" ]] && return 0
+
+  if [[ "$choice" == "custom..." ]]; then
+    read -rp "Enter status: " choice
+    [[ -z "$choice" ]] && return 0
+  fi
+
+  plan "${ids[@]}" status "$choice"
+}
+# Move selected tickets relative to cursor.
+# $1 = target (cursor line), $2.. = selected lines
+# Target is identified by being the first arg; selected items follow.
+_fn_move() {
+  local target="$1" relation key scratch; shift
+  [[ $# -gt 0 ]] || { echo -n $'  Select at least one ticket to move\e[K\e[36D' >/dev/tty; return 0; }
+
+  local dest_id; dest_id=$(_parse_id "$target")
+  [[ -z "$dest_id" || "$dest_id" == "0" ]] && { echo -n $'  The destination should be a ticket\e[K\e[36D' >/dev/tty; return 0; }
+
+  local ids; ids=($(_parse_ids "$@"))
+  [[ ${#ids[@]} -gt 0 ]] || return 0
+
+  # Don't move a ticket onto itself
+  local move_ids=()
+  for id in "${ids[@]}"; do
+    [[ "$id" != "$dest_id" ]] && move_ids+=("$id")
+  done
+  [[ ${#move_ids[@]} -gt 0 ]] || { echo -n $'  Select at least one ticket to move\e[K\e[36D' >/dev/tty; return 0; }
+
+  echo -n $'\e[K == \e[7mUp\e[m / \e[7mDown\e[m / \e[7mLeft\e[m / \e[7mRight\e[m == \e[K' >/dev/tty
+  key=$(_fn_readkey </dev/tty)
+  echo -n $'\e[32D\e[K' >/dev/tty
+  #while read -rs -t 0.001 line; do read scratch; done # flush terminal input
+  case "$key" in
+    i|$'\e[A') relation=before;;                     # 'i', Up
+    a|$'\e[B') relation=after;;                      # 'a', Down
+    I|$'\e[D'|$'\e\e[D'|$'\e\e[A') relation=first;;  # 'I', Left, Alt-Left, Alt-Up
+    A|$'\e[C'|$'\e\e[C'|$'\e\e[B') relation=last;;   # 'A', Right,Alt-Right, Alt-Down
+    *) { echo -n $'  Cancelled\e[K\e[11D' >/dev/tty; return 0; }
+  esac
+
+  plan "${move_ids[@]}" move "$relation" "$dest_id" >/dev/tty
+  return 0
+}
+_fn_movehelp() {
+  cat <<'EOF'
+
+
+    Insert before : i  Up
+    Insert after  : a  Down
+    Insert child  : I  Left  Alt-Left  Alt-Up
+    Append child  : A  Right Alt-Right Alt-Down
+
+
+EOF
+}
+_fn_create() {
+  local mode="$1" cursor_id
+  cursor_id=$(_parse_id "${2:-}")
+  [[ -z "$cursor_id" ]] && return 1
+
+  case "$mode" in
+    before) plan create -e 'title="New ticket", move="before '"$cursor_id"'"' ;;
+    after)  plan create -e 'title="New ticket", move="after '"$cursor_id"'"' ;;
+    first)  plan create -e 'title="New ticket", move="first '"$cursor_id"'"' ;;
+    last)   plan create -e 'title="New ticket", move="last '"$cursor_id"'"' ;;
+    *)      echo "Unknown create mode: $mode" >&2; return 1 ;;
+  esac || sleep 1
+}
+_fn_help() {
+  cat <<'EOF'
+plzf — fzf-based TUI for plan tickets
+Type to search/filter. All actions use Alt key.
+
+NAVIGATION
+  up/down            Move cursor
+  home/end           First/last ticket
+  left/right         Scroll list horizontally
+  alt-down           Scope down into children
+  alt-up             Scope up to parent
+  alt-right          Expand one depth level
+  alt-left           Collapse one depth level
+  enter, alt-v       View ticket in pager
+  alt-enter, alt-V   View ticket recursively (with children)
+  ctrl-p, alt-p      Toggle preview pane
+
+SELECTION (multi-select for status, close, reopen, move)
+  tab, alt-space     Toggle selection
+  ctrl-a             Select all visible
+  ctrl-n             Deselect all
+
+STATUS
+  alt-s              Change status (submenu)
+  alt-c              Close ticket
+  alt-o              Reopen ticket
+
+CREATE
+  alt-i              Insert before cursor
+  alt-a              Insert after cursor
+  alt-I              Insert as first child
+  alt-A              Insert as last child
+
+EDIT
+  alt-e              Edit ticket in $EDITOR
+  alt-E              Edit ticket recursively
+
+MOVE (select tickets first, then move to cursor position)
+  alt-m              Move selected tickets
+            The next key defines where to insert selection:
+    Insert before:  i / Up
+     Insert after:  a / Down
+     Insert child:  I / Left  / Alt-Left  / Alt-Up
+     Append child:  A / Right / Alt-Right / Alt-Down
+
+
+OTHER
+  ctrl-/             Clear search query
+  ctrl-l             Refresh list
+  alt-?              This help
+  esc / ctrl-c       Quit
+EOF
+}
+
+# --- State temp files (exported for --function callbacks) ---
+_setup_state() {
+  PLZF_STATE="$(mktemp)"    # current scope ticket ID (empty = root)
+  PLZF_DEPTH="$(mktemp)"    # max visible depth relative to scope (empty = all)
+  PLZF_HSCROLL="$(mktemp)"  # horizontal scroll offset (chars cut from left)
+  PLZF_ARGS="$(mktemp)"     # base selectors/filters (static, from command line)
+  export PLZF_STATE PLZF_DEPTH PLZF_HSCROLL PLZF_ARGS
+  echo -n "0" > "$PLZF_HSCROLL"
+  trap '_cleanup_state' EXIT
+}
+
+_cleanup_state() {
+  rm -f "$PLZF_STATE" "$PLZF_DEPTH" "$PLZF_HSCROLL" "$PLZF_ARGS"
+}
+
+main() {
+  _setup_state
+  # Store command-line args as base selectors/filters (one per line, for safe reading)
+  if [[ $# -gt 0 ]]; then
+    printf '%s\n' "$@" > "$PLZF_ARGS"
+  fi
+
+  local _rl="+reload($SELF --function list)"
+
+  local _pw="follow,right,70%,wrap"
+  if [[ $(tput cols) -lt 100 ]]; then
+    _pw="follow,down,60%,wrap"
+    export PLZF_PREVIEW_DOWN=1
+  fi
+
+  "$SELF" --function list | \
+  fzf \
+    --layout=reverse-list --no-sort -i --ansi --filepath-word --multi \
+    --no-select-1 --exit-0 \
+    --delimiter '\t' --with-nth 2.. \
+    --preview-window="$_pw" \
+    --preview "$SELF --function preview {}" \
+    --prompt '> ' \
+    --header 'F1, Alt-? : help' \
+    --bind "enter:execute($SELF --function view {})" \
+    --bind "alt-enter:execute($SELF --function view {} -r)" \
+    --bind "alt-v:execute($SELF --function view {})" \
+    --bind "alt-V:execute($SELF --function view {} -r)" \
+    --bind "alt-down:execute-silent($SELF --function down {})${_rl}+first" \
+    --bind "alt-up:execute-silent($SELF --function up)${_rl}+first" \
+    --bind "alt-right:execute-silent($SELF --function expand)${_rl}" \
+    --bind "alt-left:execute-silent($SELF --function collapse)${_rl}" \
+    --bind "alt-s:execute(tput smcup 2>/dev/null; $SELF --function status {+})${_rl}" \
+    --bind "alt-c:execute-silent($SELF --function close {+})${_rl}" \
+    --bind "alt-o:execute-silent($SELF --function reopen {+})${_rl}" \
+    --bind "alt-i:execute($SELF --function create before {})${_rl}" \
+    --bind "alt-a:execute($SELF --function create after {})${_rl}" \
+    --bind "alt-I:execute($SELF --function create first {})${_rl}" \
+    --bind "alt-A:execute($SELF --function create last {})${_rl}" \
+    --bind "alt-e:execute($SELF --function edit {})${_rl}" \
+    --bind "alt-E:execute($SELF --function edit {} -r)${_rl}" \
+    --bind "alt-m:execute-silent($SELF --function move {} {+})${_rl}" \
+    --bind "tab:toggle+down" \
+    --bind "btab:toggle+up" \
+    --bind "alt-space:toggle" \
+    --bind "ctrl-a:select-all" \
+    --bind "ctrl-n:deselect-all" \
+    --bind "alt-q:abort" \
+    --bind "home:first" \
+    --bind "end:last" \
+    --bind "right:execute-silent($SELF --function scroll_right)${_rl}" \
+    --bind "left:execute-silent($SELF --function scroll_left)${_rl}" \
+    --bind "change:execute-silent(echo -n 0 > $PLZF_HSCROLL)${_rl}" \
+    --bind "ctrl-p:toggle-preview" \
+    --bind "alt-p:toggle-preview" \
+    --bind "esc:clear-query" \
+    --bind "ctrl-l:reload($SELF --function list)" \
+    --bind "alt-?:preview($SELF --function help)" \
+    --bind "alt-/:preview($SELF --function help)" \
+    --bind "alt-/:preview($SELF --function help)" \
+    --bind "ctrl-/:preview($SELF --function help)" \
+    --bind "f1:preview($SELF --function help)"
+}
+
+case "${1:-}" in
+  --function) shift; "_fn_$1" "${@:2}" ;;
+  --help|-h)  usage; exit 0 ;;
+  *)          main "$@" ;;
+esac

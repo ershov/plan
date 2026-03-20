@@ -1,0 +1,17 @@
+plan del — Delete content
+
+Usage:
+  plan N del                       Delete a ticket (must have no children)
+  plan del N                       Same as above
+  plan N -r del                    Delete ticket and all descendants
+  plan N -r EXPR del               Delete matching descendants only
+  plan N attr NAME del             Delete an attribute
+
+Selectors and verbs can appear in either order.
+Tickets with child tickets require -r to delete recursively.
+
+Examples:
+  plan 5 del
+  plan del 5
+  plan 1 -r del
+  plan 1 -r 'status=="closed"' del

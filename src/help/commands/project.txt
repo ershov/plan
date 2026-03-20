@@ -1,0 +1,17 @@
+plan project — Access project-level sections (selector)
+
+Usage:
+  plan project                 List all project sections
+  plan project SECTION         Print a section's content
+  plan project SECTION add TXT Append text to a section
+  plan project SECTION replace --force TXT
+                               Replace section content
+
+Sections are the markdown headings under the project root, such as
+Metadata, Description, Roles, etc.
+
+Examples:
+  plan project
+  plan project description
+  plan project metadata get
+  plan project description add "New paragraph"

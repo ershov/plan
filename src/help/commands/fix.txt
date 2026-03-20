@@ -1,0 +1,7 @@
+plan fix — Auto-repair the plan document
+
+Usage:
+  plan fix
+
+Fixes common issues found by 'check': re-assigns duplicate IDs,
+removes broken links, and repairs other structural problems.

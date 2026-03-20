@@ -1,0 +1,14 @@
+plan next — Show next ticket in execution order (verb)
+
+Usage:
+  plan next                      Next ticket (list order -n 1)
+  plan next -n 3                 Next 3 tickets
+  plan next 'assignee==""'       Next unassigned ticket
+
+  Shortcut for 'list order -n 1'. The -n flag overrides the default
+  limit of 1. All other list flags work normally.
+
+Examples:
+  plan next
+  plan next --format 'f"{indent}#{id} {title}"'
+  plan next -n 5
