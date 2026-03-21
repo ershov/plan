@@ -4,6 +4,8 @@ A single-file CLI tool that manages tickets in a structured markdown file. Desig
 
 No external dependencies — only Python 3 standard library.
 
+* [Comprehensive documentation](doc/README.md)
+
 ## Quick start
 
 ```bash
