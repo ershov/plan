@@ -7501,6 +7501,25 @@ class TestCreateEditorMode(unittest.TestCase):
             call_arg = mock_ed.call_args[0][0]
             self.assertIn("## Pre", call_arg)
 
+    def test_create_edit_with_move_expr_no_phantom_ticket(self):
+        """create -e 'move="after 3"' must not leak a Ticket(0) into the tree."""
+        p = plan.parse(SAMPLE_DOC)
+        parent_ticket = p.lookup("1")
+        children_before = len(parent_ticket.children)
+        all_ids_before = set(p.id_map.keys())
+        # Editor returns a valid template; move target #3 is a child of #1
+        template_text = "## New ticket\n\n    move: after 3\n"
+        req = plan.ParsedRequest()
+        req.flags["edit"] = True
+        output = []
+        with unittest.mock.patch('plan._open_editor', return_value=template_text):
+            plan._handle_create(p, ['move="after 3"'], req, output)
+        # Exactly one new child should be added (no phantom ticket #0)
+        self.assertEqual(len(parent_ticket.children), children_before + 1)
+        for child in parent_ticket.children:
+            self.assertNotEqual(child.node_id, 0,
+                                "Phantom Ticket(0) leaked into children")
+
     def test_create_editor_cancel(self):
         """create editor returns None (empty) — no ticket created."""
         p = plan.parse(SAMPLE_DOC)

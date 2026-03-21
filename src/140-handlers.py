@@ -1532,7 +1532,9 @@ def _handle_create(project, cmd_args, req, output):
         prefill_attrs = {}
         if expr_str:
             tmp = Ticket(0, "", "Task")
-            apply_mod(tmp, project, f"set({expr_str})")
+            # Use a detached project to prevent side effects (e.g. move
+            # reparenting the temporary ticket into the real tree).
+            apply_mod(tmp, None, f"set({expr_str})")
             prefill_title = tmp.title
             prefill_body = '\n'.join(l.strip() for l in tmp.body_lines if l.strip())
             for k, v in tmp.attrs.items():

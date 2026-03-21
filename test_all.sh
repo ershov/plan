@@ -26,6 +26,7 @@ run_suite "Scenario tests (test_scenarios.py)" python3 -m unittest "$SCRIPT_DIR/
 run_suite "Scenario tests (test_scenarios.sh)" bash "$SCRIPT_DIR/test_scenarios.sh"
 run_suite "Bulk tests (test_bulk.sh)"          bash "$SCRIPT_DIR/test_bulk.sh"
 run_suite "UI tests (test_plan-ui.sh)"            bash "$SCRIPT_DIR/test_plan-ui.sh"
+run_suite "TUI tests (test_plan-tui.sh)"          bash "$SCRIPT_DIR/test_plan-tui.sh"
 
 run_suite "Stress test (seed=42, 200 ops)" bash -c "python3 '$SCRIPT_DIR/stress_test.py' 42 200 | bash"
 

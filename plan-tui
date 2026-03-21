@@ -1,0 +1,2312 @@
+#!/usr/bin/env python3
+
+# THIS IS A GENERATED FILE - DO NOT EDIT!
+# SOURCE START: 010-prelude.py {{{
+"""plan-tui: Terminal UI for plan tickets"""
+
+import sys
+import os
+import select
+import signal
+import termios
+import tty
+import subprocess
+import shutil
+import re
+import errno
+import threading
+
+# Plan binary discovery: check PATH first, then same directory as this script
+PLAN_BIN = shutil.which('plan') or shutil.which('plan.py')
+if not PLAN_BIN:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _candidate = os.path.join(_script_dir, 'plan.py')
+    if os.path.isfile(_candidate) and os.access(_candidate, os.X_OK):
+        PLAN_BIN = _candidate
+    else:
+        sys.exit('plan-tui requires plan in PATH or same directory')
+# }}} # SOURCE END: 010-prelude.py
+
+# SOURCE START: 020-terminal.py {{{
+# ---------------------------------------------------------------------------
+# Terminal layer: raw mode, VT100 output helpers, keystroke reader
+# ---------------------------------------------------------------------------
+
+_saved_termios = None
+_orig_sigtstp_handler = None
+g_resize_flag = False
+_notify_r = -1    # read end of self-pipe for waking up read_key
+_notify_w = -1    # write end
+
+# ---- output helpers -------------------------------------------------------
+
+def write(s):
+    """Write string to stdout without flushing."""
+    sys.stdout.write(s)
+
+def flush():
+    """Flush stdout."""
+    sys.stdout.flush()
+
+def move(row, col):
+    """Move cursor to 1-based (row, col) position."""
+    write(f'\033[{row};{col}H')
+
+def clear_line():
+    """Erase the entire current line."""
+    write('\033[2K')
+
+def set_scroll_region(top, bottom):
+    """Set the scrolling region to rows top..bottom (1-based, inclusive)."""
+    write(f'\033[{top};{bottom}r')
+
+def scroll_up():
+    """Scroll the contents of the scroll region up by one line."""
+    write('\033D')
+
+def scroll_down():
+    """Scroll the contents of the scroll region down by one line."""
+    write('\033M')
+
+def set_style(fg=None, bg=None, bold=False, reverse=False):
+    """Apply 256-color style. fg/bg are ints 0-255 or None."""
+    parts = ['0']  # reset first
+    if bold:
+        parts.append('1')
+    if reverse:
+        parts.append('7')
+    if fg is not None:
+        parts.append(f'38;5;{fg}')
+    if bg is not None:
+        parts.append(f'48;5;{bg}')
+    write(f'\033[{";".join(parts)}m')
+
+def reset_style():
+    """Reset all text attributes."""
+    write('\033[0m')
+
+# ---- terminal size --------------------------------------------------------
+
+def term_size():
+    """Return (cols, rows) tuple for the current terminal."""
+    sz = os.get_terminal_size()
+    return (sz.columns, sz.lines)
+
+# ---- signal handlers ------------------------------------------------------
+
+def _handle_sigwinch(signum, frame):
+    global g_resize_flag
+    g_resize_flag = True
+
+def _handle_sigtstp(signum, frame):
+    """Restore terminal, then re-raise SIGTSTP with the default handler."""
+    term_restore()
+    # Temporarily set default handler so re-raise actually stops the process
+    signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTSTP)
+
+def _handle_sigcont(signum, frame):
+    """Re-enter raw mode after being resumed from a SIGTSTP stop."""
+    global g_resize_flag
+    _enter_raw()
+    # Re-register SIGTSTP handler (it was set to SIG_DFL before stop)
+    signal.signal(signal.SIGTSTP, _handle_sigtstp)
+    # Force a full redraw
+    g_resize_flag = True
+
+# ---- raw mode / alternate screen -----------------------------------------
+
+def _enter_raw():
+    """Enter raw mode and switch to the alternate screen."""
+    global _saved_termios
+    if _saved_termios is None:
+        _saved_termios = termios.tcgetattr(sys.stdin.fileno())
+    tty.setraw(sys.stdin.fileno())
+    # Alternate screen buffer, hide cursor
+    sys.stdout.buffer.write(b'\033[?1049h\033[?25l')
+    sys.stdout.buffer.flush()
+
+def notify_wake():
+    """Wake up read_key() from another thread (e.g. after async preview load)."""
+    if _notify_w >= 0:
+        try:
+            os.write(_notify_w, b'\x00')
+        except OSError:
+            pass
+
+def term_init():
+    """Save termios, enter raw mode, alternate screen, hide cursor.
+    Also registers signal handlers for SIGWINCH, SIGTSTP, and SIGCONT.
+    """
+    global _orig_sigtstp_handler, _notify_r, _notify_w
+    _orig_sigtstp_handler = signal.getsignal(signal.SIGTSTP)
+    # Create self-pipe for async notification
+    _notify_r, _notify_w = os.pipe()
+    os.set_blocking(_notify_r, False)
+    os.set_blocking(_notify_w, False)
+    _enter_raw()
+    signal.signal(signal.SIGWINCH, _handle_sigwinch)
+    signal.signal(signal.SIGTSTP, _handle_sigtstp)
+    signal.signal(signal.SIGCONT, _handle_sigcont)
+
+def term_restore():
+    """Restore termios, leave alternate screen, show cursor."""
+    global _saved_termios, _notify_r, _notify_w
+    # Show cursor, leave alternate screen
+    sys.stdout.buffer.write(b'\033[?25h\033[?1049l')
+    sys.stdout.buffer.flush()
+    if _saved_termios is not None:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, _saved_termios)
+    # Close notification pipe
+    for fd in (_notify_r, _notify_w):
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    _notify_r = _notify_w = -1
+
+# ---- suspend / resume for shelling out -----------------------------------
+
+def term_suspend():
+    """Restore terminal for an external command (editor, pager, etc.)."""
+    term_restore()
+
+def term_resume():
+    """Re-enter raw mode and alternate screen after an external command."""
+    global g_resize_flag
+    _enter_raw()
+    g_resize_flag = True
+
+# ---- keystroke reader -----------------------------------------------------
+
+def read_key():
+    """Read one keystroke and return a string name for it.
+
+    Handles multi-byte escape sequences, alt-combos, and bare ESC
+    (disambiguated via a 50 ms timeout after the initial ESC byte).
+    Retries on EINTR (e.g. from SIGWINCH).
+    Also wakes up on the notification pipe and returns '_notify'.
+    """
+    fd = sys.stdin.fileno()
+
+    # Wait for stdin or notification pipe
+    watch_fds = [fd]
+    if _notify_r >= 0:
+        watch_fds.append(_notify_r)
+    while True:
+        try:
+            ready, _, _ = select.select(watch_fds, [], [])
+        except OSError as e:
+            if e.errno == errno.EINTR:
+                continue
+            raise
+        if _notify_r >= 0 and _notify_r in ready:
+            # Drain the notification pipe
+            try:
+                os.read(_notify_r, 1024)
+            except OSError:
+                pass
+            if fd not in ready:
+                return '_notify'
+        break  # stdin is ready
+
+    def _read1():
+        """Read a single byte from stdin, retrying on EINTR."""
+        while True:
+            try:
+                b = os.read(fd, 1)
+                if not b:
+                    return ''
+                return b.decode('utf-8', errors='replace')
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                raise
+
+    def _peek(timeout=0.05):
+        """Return True if more input is available within *timeout* seconds."""
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], timeout)
+                return bool(r)
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                raise
+
+    ch = _read1()
+    if ch == '':
+        return 'esc'  # EOF treated as esc
+
+    o = ord(ch)
+
+    # ---- Ctrl combos (0x01-0x1a excluding special cases) ------------------
+    if ch == '\r' or ch == '\n':
+        return 'enter'
+    if ch == '\t':
+        return 'tab'
+    if ch == '\x7f' or ch == '\x08':
+        return 'backspace'
+    if ch == ' ':
+        return 'space'
+
+    if ch == '\x1b':
+        # ESC received — could be bare Esc, Alt-combo, or escape sequence
+        if not _peek():
+            return 'esc'
+
+        ch2 = _read1()
+        if ch2 == '':
+            return 'esc'
+
+        # CSI sequence: ESC [
+        if ch2 == '[':
+            return _read_csi(fd, _read1, _peek)
+
+        # SS3 sequence: ESC O  (commonly used for F1-F4)
+        if ch2 == 'O':
+            ch3 = _read1()
+            if ch3 == 'P':
+                return 'f1'
+            if ch3 == 'Q':
+                return 'f2'
+            if ch3 == 'R':
+                return 'f3'
+            if ch3 == 'S':
+                return 'f4'
+            # Unknown SS3 — return what we can
+            return 'esc'
+
+        # Alt-combo: ESC + printable char
+        if ' ' <= ch2 <= '~':
+            return 'alt-' + ch2
+
+        # Alt + control char (e.g. Alt-Enter = ESC + CR)
+        if ch2 == '\r' or ch2 == '\n':
+            return 'alt-enter'
+
+        return 'esc'
+
+    # ---- Ctrl-A through Ctrl-Z (except those handled above) ---------------
+    if 1 <= o <= 26:
+        return 'ctrl-' + chr(o + 96)  # 0x01 -> 'ctrl-a', etc.
+
+    # ---- Regular printable character --------------------------------------
+    return ch
+
+
+def _read_csi(fd, _read1, _peek):
+    """Parse a CSI (ESC [) escape sequence and return a key name."""
+    buf = ''
+    while True:
+        ch = _read1()
+        if ch == '':
+            break
+        # CSI parameters and intermediates are in 0x20-0x3F range
+        # Final byte is in 0x40-0x7E range
+        buf += ch
+        if '@' <= ch <= '~':
+            break
+
+    # Arrow keys
+    if buf == 'A':
+        return 'up'
+    if buf == 'B':
+        return 'down'
+    if buf == 'C':
+        return 'right'
+    if buf == 'D':
+        return 'left'
+
+    # Shift-Tab: ESC [ Z
+    if buf == 'Z':
+        return 'btab'
+
+    # Home / End (rxvt, xterm without application mode)
+    if buf == 'H':
+        return 'home'
+    if buf == 'F':
+        return 'end'
+
+    # Tilde sequences: ESC [ <number> ~
+    if buf.endswith('~'):
+        num = buf[:-1]
+        if num == '1' or num == '7':
+            return 'home'
+        if num == '4' or num == '8':
+            return 'end'
+        if num == '5':
+            return 'pgup'
+        if num == '6':
+            return 'pgdn'
+        if num == '2':
+            return 'insert'
+        if num == '3':
+            return 'delete'
+        if num == '11':
+            return 'f1'
+        if num == '12':
+            return 'f2'
+        if num == '13':
+            return 'f3'
+        if num == '14':
+            return 'f4'
+        if num == '15':
+            return 'f5'
+        if num == '17':
+            return 'f6'
+        if num == '18':
+            return 'f7'
+        if num == '19':
+            return 'f8'
+        if num == '20':
+            return 'f9'
+        if num == '21':
+            return 'f10'
+        if num == '23':
+            return 'f11'
+        if num == '24':
+            return 'f12'
+
+    # Shift/Ctrl modified arrows: ESC [ 1 ; <mod> <A-D>
+    if len(buf) >= 3 and buf[-1] in 'ABCD' and ';' in buf:
+        direction = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left'}[buf[-1]]
+        # Extract modifier: 2=shift, 3=alt, 5=ctrl, etc.
+        parts = buf[:-1].split(';')
+        if len(parts) == 2:
+            try:
+                mod = int(parts[1])
+            except ValueError:
+                return direction
+            if mod == 2:
+                return 'shift-' + direction
+            if mod == 3:
+                return 'alt-' + direction
+            if mod == 5:
+                return 'ctrl-' + direction
+            if mod == 6:
+                return 'ctrl-shift-' + direction
+        return direction
+
+    # CSI u encoding (kitty keyboard protocol): ESC [ <keycode> ; <mod> u
+    if buf.endswith('u') and ';' in buf:
+        parts = buf[:-1].split(';')
+        if len(parts) == 2:
+            try:
+                keycode = int(parts[0])
+                mod = int(parts[1])
+            except ValueError:
+                pass
+            else:
+                if keycode == 13:  # Enter
+                    if mod == 2:
+                        return 'shift-enter'
+                    if mod == 3:
+                        return 'alt-enter'
+
+    # Fallback: unknown CSI sequence
+    return 'esc'
+# }}} # SOURCE END: 020-terminal.py
+
+# SOURCE START: 030-data.py {{{
+##############################################################################
+# Data Layer — all plan interaction through subprocess calls
+##############################################################################
+
+_cache = {}
+
+
+def cache_invalidate():
+    """Clear the entire cache."""
+    _cache.clear()
+
+
+def cache_invalidate_ticket(ticket_id):
+    """Clear cached preview and children for a specific ticket."""
+    if 'preview' in _cache:
+        _cache['preview'].pop(ticket_id, None)
+    if 'children' in _cache:
+        _cache['children'].pop(ticket_id, None)
+
+
+def _run_plan(*args):
+    """Run plan command with captured output. Returns CompletedProcess."""
+    try:
+        return subprocess.run(
+            [PLAN_BIN] + list(args),
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        # Return a fake CompletedProcess on failure
+        return subprocess.CompletedProcess(
+            args=[PLAN_BIN] + list(args),
+            returncode=1,
+            stdout='',
+            stderr='',
+        )
+
+
+def _parse_ticket_line(line):
+    """Parse a tab-separated ticket line into a dict."""
+    parts = line.split('\t', 5)
+    if len(parts) < 6:
+        return None
+    return {
+        'id': int(parts[0]),
+        'parent': int(parts[1]),
+        'status': parts[2],
+        'has_children': parts[3] == '1',
+        'depth': int(parts[4]),
+        'title': parts[5],
+    }
+
+
+_LIST_FORMAT = 'f"{id}\\t{parent}\\t{status}\\t{1 if children() else 0}\\t{depth}\\t{title}"'
+
+
+def plan_list(scope):
+    """Get all tickets. Returns list of dicts.
+
+    scope=None for root, scope=ticket_id to list descendants of that ticket.
+    """
+    if 'list' in _cache and _cache.get('list_scope') == scope:
+        return _cache['list']
+
+    if scope is None:
+        result = _run_plan('list', '--format', _LIST_FORMAT)
+    else:
+        result = _run_plan(
+            'is_descendant_of({})'.format(scope),
+            str(scope),
+            'list',
+            '--format', _LIST_FORMAT,
+        )
+
+    if result.returncode != 0:
+        return []
+
+    tickets = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ticket = _parse_ticket_line(line)
+        if ticket is not None:
+            tickets.append(ticket)
+
+    _cache['list'] = tickets
+    _cache['list_scope'] = scope
+    return tickets
+
+
+def plan_get(ticket_id):
+    """Get ticket details. Returns raw text string."""
+    if 'preview' not in _cache:
+        _cache['preview'] = {}
+    if ticket_id in _cache['preview']:
+        return _cache['preview'][ticket_id]
+
+    if ticket_id == 0:
+        result = _run_plan('project', 'get')
+    else:
+        result = _run_plan(str(ticket_id), 'get')
+
+    if result.returncode != 0:
+        return ''
+
+    text = result.stdout
+    _cache['preview'][ticket_id] = text
+    return text
+
+
+def plan_children(ticket_id):
+    """Get direct children of a ticket. Returns list of dicts."""
+    if 'children' not in _cache:
+        _cache['children'] = {}
+    if ticket_id in _cache['children']:
+        return _cache['children'][ticket_id]
+
+    result = _run_plan(
+        str(ticket_id), '-r',
+        'list',
+        '--format', _LIST_FORMAT,
+    )
+
+    if result.returncode != 0:
+        _cache['children'][ticket_id] = []
+        return []
+
+    lines = result.stdout.splitlines()
+    # Skip the first result (the ticket itself)
+    lines = lines[1:]
+
+    # Determine the parent depth: direct children are at parent_depth + 1
+    parent_depth = None
+    children = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        ticket = _parse_ticket_line(line)
+        if ticket is None:
+            continue
+        if parent_depth is None:
+            # First child tells us the expected depth
+            parent_depth = ticket['depth'] - 1
+        if ticket['depth'] == parent_depth + 1:
+            children.append(ticket)
+
+    _cache['children'][ticket_id] = children
+    return children
+
+
+def plan_status(ids, status):
+    """Set status on tickets. Skip id=0. Returns error string or ''."""
+    filtered = [str(i) for i in ids if i != 0]
+    if not filtered:
+        return ''
+    result = _run_plan(*filtered + ['status', status])
+    if result.returncode != 0:
+        return result.stderr.strip() or 'status command failed'
+    return ''
+
+
+def plan_close(ids):
+    """Close tickets. Skip id=0. Returns error string or ''."""
+    filtered = [str(i) for i in ids if i != 0]
+    if not filtered:
+        return ''
+    result = _run_plan(*filtered + ['close'])
+    if result.returncode != 0:
+        return result.stderr.strip() or 'close command failed'
+    return ''
+
+
+def plan_reopen(ids):
+    """Reopen tickets. Skip id=0. Returns error string or ''."""
+    filtered = [str(i) for i in ids if i != 0]
+    if not filtered:
+        return ''
+    result = _run_plan(*filtered + ['reopen'])
+    if result.returncode != 0:
+        return result.stderr.strip() or 'reopen command failed'
+    return ''
+
+
+def plan_edit(ticket_id, recursive=False):
+    """Edit a ticket in the editor. Returns subprocess return code.
+
+    Does NOT suspend/resume terminal — caller handles that.
+    """
+    try:
+        if ticket_id == 0:
+            args = [PLAN_BIN, 'edit', 'project']
+        else:
+            args = [PLAN_BIN, 'edit', str(ticket_id)]
+        if recursive:
+            # -r flag goes after the ID
+            if ticket_id == 0:
+                args = [PLAN_BIN, 'edit', '-r', 'project']
+            else:
+                args = [PLAN_BIN, 'edit', '-r', str(ticket_id)]
+        result = subprocess.run(args)
+        return result.returncode
+    except Exception:
+        return 1
+
+
+def plan_create(mode, cursor_id):
+    """Create a new ticket. Returns subprocess return code.
+
+    Does NOT suspend/resume terminal — caller handles that.
+    """
+    try:
+        result = subprocess.run([
+            PLAN_BIN, 'create', '-e',
+            'title="New ticket", move="{} {}"'.format(mode, cursor_id),
+        ])
+        return result.returncode
+    except Exception:
+        return 1
+
+
+def plan_move(ids, relation, dest_id):
+    """Move tickets. relation is one of: before, after, first, last. Skip id=0.
+    Returns error string or ''."""
+    filtered = [str(i) for i in ids if i != 0]
+    if not filtered:
+        return ''
+    result = _run_plan(*filtered + ['move', relation, str(dest_id)])
+    if result.returncode != 0:
+        return result.stderr.strip() or 'move command failed'
+    return ''
+# }}} # SOURCE END: 030-data.py
+
+# SOURCE START: 040-state.py {{{
+##############################################################################
+# Application State — module-level variables and state helpers
+##############################################################################
+
+all_tickets = []      # flat list of ticket dicts from plan_list() (full tree, cached)
+cursor = 0            # integer index into the visible tickets list
+scope = None          # ticket ID (int) or None for root
+expanded = set()      # set of ticket IDs that have been expanded
+selected = set()      # set of ticket IDs for multi-select
+search_query = ''     # string, empty when not in search mode
+search_mode = False   # bool, whether keystrokes go to search input
+preview_text = ''     # cached string for preview pane
+children_list = []    # cached list of dicts for subtickets pane
+needs_redraw = set()  # set of strings: 'list', 'subtickets', 'preview', 'status', 'all'
+show_preview = True   # whether the preview pane is visible (Ctrl-P toggles)
+help_mode = False     # when True, preview pane shows help text instead of ticket
+error_text = ''       # when non-empty, preview pane shows error output
+_preview_scroll = 0   # scroll offset within the preview pane
+_last_preview_id = -1 # tracks which ticket ID the preview is cached for
+
+_visible_cache = None # cached result of visible_tickets()
+_visible_dirty = True # flag: rebuild visible list on next call
+
+
+def _mark_visible_dirty():
+    """Mark the visible tickets cache as stale."""
+    global _visible_dirty
+    _visible_dirty = True
+
+
+def visible_tickets():
+    """Return the list of ticket dicts that should be displayed.
+
+    Caches its result; only rebuilds when _visible_dirty is True.
+    """
+    global _visible_cache, _visible_dirty
+
+    if not _visible_dirty and _visible_cache is not None:
+        return _visible_cache
+
+    # Build id_map from all_tickets (excluding synthetic entries)
+    id_map = {}
+    for t in all_tickets:
+        id_map[t['id']] = t
+
+    result = []
+
+    if scope is None:
+        # Root scope — prepend synthetic Project entry
+        project_entry = {
+            'id': 0,
+            'parent': 0,
+            'status': '',
+            'has_children': True,
+            'depth': 0,
+            'title': 'Project',
+        }
+        result.append(project_entry)
+
+        # Determine base depth (minimum depth in all_tickets)
+        if all_tickets:
+            base_depth = min(t['depth'] for t in all_tickets)
+        else:
+            base_depth = 0
+
+        for t in all_tickets:
+            if t['depth'] == base_depth:
+                # Always visible at root level
+                result.append(t)
+            else:
+                # Deeper ticket: walk parent chain, every ancestor between
+                # base_depth (exclusive) and this ticket must be in expanded
+                visible = True
+                cur = t
+                while cur['depth'] > base_depth:
+                    pid = cur['parent']
+                    parent = id_map.get(pid)
+                    if parent is None:
+                        # Parent not in our list — treat as visible if at
+                        # base_depth + 1 (shouldn't happen, but be safe)
+                        break
+                    if parent['depth'] >= base_depth and parent['id'] not in expanded:
+                        visible = False
+                        break
+                    cur = parent
+                if visible:
+                    result.append(t)
+    else:
+        # Scoped view — scope ticket is at depth D; children are at D+1
+        scope_ticket = id_map.get(scope)
+        if scope_ticket is None:
+            # Scope ticket not found; return empty
+            _visible_cache = []
+            _visible_dirty = False
+            return _visible_cache
+
+        scope_depth = scope_ticket['depth']
+        child_base = scope_depth + 1
+
+        # Include the scope ticket itself as the first entry
+        result.append(scope_ticket)
+
+        for t in all_tickets:
+            if t['id'] == scope:
+                continue  # already included above
+            if t['depth'] < child_base:
+                continue  # not a descendant within scope
+            if t['depth'] == child_base:
+                # Direct child of scope — always visible
+                result.append(t)
+            else:
+                # Deeper descendant: walk parent chain up to child_base,
+                # every intermediate ancestor must be in expanded
+                visible = True
+                cur = t
+                while cur['depth'] > child_base:
+                    pid = cur['parent']
+                    parent = id_map.get(pid)
+                    if parent is None:
+                        visible = False
+                        break
+                    if parent['id'] not in expanded:
+                        visible = False
+                        break
+                    cur = parent
+                if visible:
+                    result.append(t)
+
+    _visible_cache = result
+    _visible_dirty = False
+    return _visible_cache
+
+
+def reload():
+    """Reload all tickets from disk and refresh state."""
+    global all_tickets, cursor, needs_redraw
+
+    # Save current cursor ticket ID for position restoration
+    vis = visible_tickets()
+    old_ticket_id = vis[cursor]['id'] if 0 <= cursor < len(vis) else None
+
+    # Invalidate caches and refetch
+    cache_invalidate()
+    _mark_visible_dirty()
+    all_tickets = plan_list(scope)
+    _mark_visible_dirty()  # all_tickets changed
+
+    # Rebuild visible list
+    vis = visible_tickets()
+
+    # Restore cursor position
+    if old_ticket_id is not None:
+        found = False
+        for i, t in enumerate(vis):
+            if t['id'] == old_ticket_id:
+                cursor = i
+                found = True
+                break
+        if not found:
+            # Clamp to valid range
+            if vis:
+                cursor = min(cursor, len(vis) - 1)
+            else:
+                cursor = 0
+    else:
+        cursor = 0
+
+    needs_redraw = {'all'}
+    update_preview()
+
+
+_preview_gen = 0          # incremented on each new request; stale results discarded
+_preview_event = threading.Event()
+_preview_req = None       # (gen, tid) — latest pending request
+_preview_result = None    # (text, children) — set by worker, consumed by main thread
+_preview_worker_started = False
+
+def _preview_worker():
+    """Single background thread: fetch preview data one request at a time.
+
+    Lets each subprocess finish naturally — never kills mid-flight.
+    After each subprocess completes, checks if the request is still current.
+    If a newer request arrived while we were busy, loops immediately to serve it.
+
+    Stores results in _preview_result for the main thread to consume — never
+    touches needs_redraw directly (avoiding a cross-thread race on set replacement).
+    """
+    global _preview_req, _preview_result
+    while True:
+        _preview_event.wait()
+        _preview_event.clear()
+
+        while True:
+            # Grab the latest request
+            req = _preview_req
+            _preview_req = None
+            if req is None:
+                break
+            gen, tid = req
+
+            if gen != _preview_gen:
+                break
+
+            text = plan_get(tid)
+            if gen != _preview_gen:
+                continue  # stale — but check if a newer request is pending
+
+            if tid == 0:
+                tickets = all_tickets
+                if tickets:
+                    bd = min(t['depth'] for t in tickets)
+                else:
+                    bd = 0
+                ch = [t for t in tickets if t['depth'] == bd]
+            else:
+                ch = plan_children(tid)
+
+            if gen != _preview_gen:
+                continue  # stale — check for newer request
+
+            _preview_result = (text, ch)
+            notify_wake()
+            break
+
+
+def apply_preview_result():
+    """Consume pending result from the preview worker (called on main thread only)."""
+    global preview_text, children_list, _preview_result, needs_redraw
+    result = _preview_result
+    if result is not None:
+        _preview_result = None
+        preview_text, children_list = result
+        needs_redraw.add('subtickets')
+        needs_redraw.add('preview')
+
+
+def update_preview():
+    """Request async refresh of preview_text and children_list for cursor ticket."""
+    global _last_preview_id, _preview_scroll, _preview_gen, _preview_req
+    global _preview_worker_started, preview_text, children_list, needs_redraw
+
+    vis = visible_tickets()
+    if not vis or cursor < 0 or cursor >= len(vis):
+        if _last_preview_id != -1:
+            _last_preview_id = -1
+            _preview_gen += 1
+            preview_text = ''
+            children_list = []
+            needs_redraw.add('subtickets')
+            needs_redraw.add('preview')
+        return
+
+    ticket = vis[cursor]
+    tid = ticket['id']
+
+    if tid == _last_preview_id:
+        return  # already showing this ticket
+
+    _last_preview_id = tid
+    _preview_scroll = 0
+
+    # Clear stale content immediately so the pane doesn't show the wrong ticket
+    preview_text = ''
+    children_list = []
+    needs_redraw.add('subtickets')
+    needs_redraw.add('preview')
+
+    # Start the worker thread once
+    if not _preview_worker_started:
+        _preview_worker_started = True
+        t = threading.Thread(target=_preview_worker, daemon=True)
+        t.start()
+
+    # Submit new request (overwrites any pending; in-flight finishes naturally)
+    _preview_gen += 1
+    _preview_req = (_preview_gen, tid)
+    _preview_event.set()
+
+
+def cursor_ticket():
+    """Return the ticket dict at the current cursor position, or None."""
+    vis = visible_tickets()
+    if 0 <= cursor < len(vis):
+        return vis[cursor]
+    return None
+
+
+def _cursor_id():
+    """Return the ticket ID under the cursor, or None."""
+    t = cursor_ticket()
+    return t['id'] if t else None
+
+
+def _cursor_to_id(saved_id):
+    """Move cursor to the ticket with saved_id, or clamp to bounds."""
+    global cursor
+    if saved_id is not None:
+        vis = visible_tickets()
+        for i, t in enumerate(vis):
+            if t['id'] == saved_id:
+                cursor = i
+                return
+    vis = visible_tickets()
+    if vis:
+        cursor = min(cursor, len(vis) - 1)
+    else:
+        cursor = 0
+# }}} # SOURCE END: 040-state.py
+
+# SOURCE START: 050-render.py {{{
+##############################################################################
+# Rendering — three panes + status bar, cursor-addressed writes
+##############################################################################
+
+_scroll_offset = 0  # scroll offset for list pane
+
+
+def layout_panes():
+    """Calculate pane positions. Returns dict with geometry for all panes."""
+    cols, rows = term_size()
+
+    available = rows  # all rows for panes (no dedicated status bar)
+
+    # List pane: 30% of screen
+    list_height = max(1, int(available * 0.30))
+    list_top = 1
+
+    if not show_preview:
+        # Preview hidden — list gets all available space, no sub/preview panes
+        list_height = available
+        return {
+            'list_top': list_top,
+            'list_height': list_height,
+            'sub_top': list_top + list_height,
+            'sub_height': 0,
+            'prev_top': list_top + list_height,
+            'prev_height': 0,
+            'info_row': 0,
+            'cols': cols,
+        }
+
+    # Subtickets pane: up to 30% of available, shrinks to fit children_list
+    if rows < 20:
+        # Too small — hide subtickets entirely
+        sub_height = 0
+    else:
+        sub_max = max(1, int(available * 0.30))
+        # Multi-column layout: compute rows needed given terminal width
+        content_rows = _sub_needed_rows(cols) if children_list else 0
+        needed = 1 + content_rows if content_rows > 0 else 0  # +1 for separator
+        sub_height = min(sub_max, needed) if needed > 0 else 0
+
+    sub_top = list_top + list_height
+
+    # Preview pane gets the remainder
+    prev_top = sub_top + sub_height
+    prev_height = available - list_height - sub_height
+    if prev_height < 0:
+        prev_height = 0
+
+    # Info row = first separator after list (children or preview)
+    info_row = sub_top if sub_height > 0 else (prev_top if prev_height > 0 else 0)
+
+    return {
+        'list_top': list_top,
+        'list_height': list_height,
+        'sub_top': sub_top,
+        'sub_height': sub_height,
+        'prev_top': prev_top,
+        'prev_height': prev_height,
+        'info_row': info_row,
+        'cols': cols,
+    }
+
+
+def render_list(top, height, cols):
+    """Render the list pane."""
+    global _scroll_offset
+
+    visible = visible_tickets()
+
+    # Adjust scroll offset to keep cursor visible
+    if cursor < _scroll_offset:
+        _scroll_offset = cursor
+    if cursor >= _scroll_offset + height:
+        _scroll_offset = cursor - height + 1
+    if _scroll_offset < 0:
+        _scroll_offset = 0
+
+    # Determine base depth for indentation relative to scope
+    if scope is not None:
+        # In scoped view, the scope ticket is first and its depth is the base
+        base_depth = visible[0]['depth'] if visible else 0
+    else:
+        # Root view: Project entry is depth 0, real tickets have their own depth
+        base_depth = 0
+
+    for row_idx in range(height):
+        vis_idx = _scroll_offset + row_idx
+        move(top + row_idx, 1)
+        clear_line()
+
+        if vis_idx >= len(visible):
+            # Blank line
+            continue
+
+        ticket = visible[vis_idx]
+        tid = ticket['id']
+        is_cursor_line = (vis_idx == cursor)
+        is_selected = (tid in selected)
+        is_search_match = (
+            search_query
+            and search_query.lower() in ticket['title'].lower()
+        )
+
+        # Build the line content
+        # Selection prefix
+        if is_selected:
+            prefix = '* '
+        else:
+            prefix = '  '
+
+        if tid == 0:
+            # Project entry — no indent, no marker
+            line = prefix + 'Project'
+        else:
+            # Indent based on depth relative to base
+            rel_depth = ticket['depth'] - base_depth
+            if rel_depth < 0:
+                rel_depth = 0
+            indent = '  ' * rel_depth
+
+            # Expand/collapse marker
+            if ticket['has_children']:
+                if tid in expanded:
+                    marker = '\u25bc '  # down triangle
+                else:
+                    marker = '\u25b6 '  # right triangle
+            else:
+                marker = '  '
+
+            line = '{}{}{}'.format(
+                prefix, indent,
+                '#{} [{}] {}'.format(tid, ticket['status'], ticket['title']),
+            )
+            # We need to insert the marker — rebuild properly
+            line = '{}{}'.format(prefix, indent)
+            marker_start = len(line)
+            line += marker
+            line += '#{} [{}] {}'.format(tid, ticket['status'], ticket['title'])
+
+        # Truncate to terminal width
+        if len(line) > cols:
+            line = line[:cols]
+
+        # Apply styling
+        if is_cursor_line:
+            set_style(reverse=True)
+            write(line)
+            # Pad to fill width for reverse video
+            if len(line) < cols:
+                write(' ' * (cols - len(line)))
+            reset_style()
+        elif is_selected and is_search_match:
+            # Selected + search match: bold cyan with yellow for match
+            set_style(fg=6, bold=True)
+            write(line)
+            reset_style()
+        elif is_selected:
+            set_style(fg=6, bold=True)
+            write(line)
+            reset_style()
+        elif is_search_match:
+            set_style(fg=3)
+            write(line)
+            reset_style()
+        else:
+            # Normal line — render marker in blue if present
+            if tid != 0 and ticket['has_children']:
+                # Write prefix + indent, then marker in blue, then rest
+                marker_text = '\u25bc ' if tid in expanded else '\u25b6 '
+                pre = prefix + ('  ' * (ticket['depth'] - base_depth if ticket['depth'] - base_depth > 0 else 0))
+                rest = '#{} [{}] {}'.format(tid, ticket['status'], ticket['title'])
+                full = pre + marker_text + rest
+                if len(full) > cols:
+                    full = full[:cols]
+                # Write prefix/indent part
+                write(pre)
+                # Write marker in blue
+                pre_len = len(pre)
+                marker_end = pre_len + len(marker_text)
+                if pre_len < cols:
+                    set_style(fg=4)
+                    marker_portion = full[pre_len:min(marker_end, cols)]
+                    write(marker_portion)
+                    reset_style()
+                # Write rest
+                if marker_end < cols:
+                    write(full[marker_end:])
+            else:
+                write(line)
+
+
+_SUB_WRAP = 80   # wrap child entries at this width
+_SUB_INDENT = '    '  # continuation indent for wrapped lines
+
+
+def _fmt_child(child):
+    """Format a child ticket for the subtickets pane."""
+    return '#{} [{}] {}'.format(child['id'], child['status'], child['title'])
+
+
+def _wrap_entry(text, width):
+    """Wrap text at width. Returns list of lines; continuation lines are indented."""
+    if len(text) <= width:
+        return [text]
+    lines = [text[:width]]
+    rest = text[width:]
+    indent = _SUB_INDENT
+    cont_w = width - len(indent)
+    if cont_w < 10:
+        cont_w = width
+        indent = ''
+    while rest:
+        lines.append(indent + rest[:cont_w])
+        rest = rest[cont_w:]
+    return lines
+
+
+def _sub_layout(children, cols):
+    """Compute multi-column layout for children entries.
+
+    Each entry is wrapped at _SUB_WRAP.  For column-width calculation, the
+    capped width (min of actual, _SUB_WRAP) is used so long titles don't
+    force single-column.
+
+    Returns (num_cols, col_width, slot_rows, entry_lines) where:
+      - slot_rows[i] = number of display rows for entry i
+      - entry_lines[i] = list of wrapped lines for entry i
+      - num_rows can be derived from slot assignments
+    """
+    if not children:
+        return (1, cols, [], [])
+
+    raw = [_fmt_child(c) for c in children]
+    entry_lines = [_wrap_entry(e, _SUB_WRAP) for e in raw]
+    slot_rows = [len(lines) for lines in entry_lines]
+
+    # Column width based on capped entry width
+    max_w = min(max(len(e) for e in raw), _SUB_WRAP)
+    gap = 2
+    col_width = max_w + gap
+    # Allow one extra partial column — it will be truncated at screen edge
+    full_cols = max(1, (cols + gap) // col_width)
+    num_cols = min(full_cols + 1, len(children))
+
+    return (num_cols, col_width, slot_rows, entry_lines)
+
+
+def _distribute_to_columns(num_cols, slot_rows):
+    """Distribute entries across columns balancing by display lines, not count.
+
+    Returns list of (start, end) index ranges, one per column.
+    """
+    n = len(slot_rows)
+    if n == 0 or num_cols == 0:
+        return []
+    total_lines = sum(slot_rows)
+    target = (total_lines + num_cols - 1) // num_cols  # ideal lines per column
+    cols = []
+    start = 0
+    for c in range(num_cols):
+        if c == num_cols - 1:
+            # Last column gets the rest
+            cols.append((start, n))
+            break
+        col_h = 0
+        end = start
+        while end < n:
+            if col_h + slot_rows[end] > target and col_h > 0:
+                break
+            col_h += slot_rows[end]
+            end += 1
+        cols.append((start, end))
+        start = end
+    return cols
+
+
+def _sub_total_rows(num_cols, slot_rows):
+    """Total display rows for a column-major layout with multi-row entries."""
+    if not slot_rows or num_cols == 0:
+        return 0
+    ranges = _distribute_to_columns(num_cols, slot_rows)
+    return max(sum(slot_rows[s:e]) for s, e in ranges) if ranges else 0
+
+
+def _sub_needed_rows(cols):
+    """Return number of content rows needed for children_list (multi-column)."""
+    if not children_list:
+        return 0
+    num_cols, _, slot_rows, _ = _sub_layout(children_list, cols)
+    return _sub_total_rows(num_cols, slot_rows)
+
+
+def render_subtickets(top, height, cols, info=False):
+    """Render the subtickets pane with a separator."""
+    if height <= 0:
+        return
+
+    _render_sep(top, cols, 'Children', info=info)
+
+    content_lines = height - 1
+    if not children_list or content_lines <= 0:
+        for i in range(content_lines):
+            move(top + 1 + i, 1)
+            clear_line()
+        return
+
+    num_cols, col_width, slot_rows, entry_lines = _sub_layout(children_list, cols)
+    ranges = _distribute_to_columns(num_cols, slot_rows)
+
+    # Build per-column line arrays
+    col_lines = []
+    for start, end in ranges:
+        lines = []
+        for idx in range(start, end):
+            lines.extend(entry_lines[idx])
+        col_lines.append(lines)
+
+    total_rows = max((len(cl) for cl in col_lines), default=0)
+
+    for row in range(content_lines):
+        move(top + 1 + row, 1)
+        clear_line()
+        if row >= total_rows:
+            continue
+        parts = []
+        for c in range(num_cols):
+            cl = col_lines[c]
+            cell = cl[row] if row < len(cl) else ''
+            if c < num_cols - 1:
+                parts.append(cell.ljust(col_width)[:col_width])
+            else:
+                parts.append(cell)
+        line = ''.join(parts)
+        if len(line) > cols:
+            line = line[:cols]
+        write(line)
+
+
+def _preview_lines():
+    """Return the lines currently shown in the preview pane."""
+    if error_text:
+        return error_text.split('\n')
+    if help_mode:
+        return _HELP_TEXT.split('\n')
+    return preview_text.split('\n') if preview_text else []
+
+
+def render_preview(top, height, cols, info=False):
+    """Render the preview pane."""
+    if height <= 0:
+        return
+
+    label = 'Error' if error_text else ('Help' if help_mode else 'Preview')
+    _render_sep(top, cols, label, info=info)
+
+    # Content (with scroll offset)
+    content_lines = height - 1
+    lines = _preview_lines()
+    for i in range(content_lines):
+        move(top + 1 + i, 1)
+        clear_line()
+        src_idx = i + _preview_scroll
+        if src_idx < len(lines):
+            line = lines[src_idx]
+            # Replace tabs with spaces for display
+            line = line.replace('\t', '    ')
+            if len(line) > cols:
+                line = line[:cols]
+            write(line)
+
+
+_SB_BG = 236   # dark gray background for action prompts
+_SB_FG = 252   # light gray text
+
+def _sb_style(**kw):
+    """Set status bar base style (dark bg, light fg) with optional overrides."""
+    set_style(fg=kw.get('fg', _SB_FG), bg=kw.get('bg', _SB_BG),
+              bold=kw.get('bold', False), reverse=kw.get('reverse', False))
+
+
+def _render_sep(row, cols, label, info=False):
+    """Render a separator line. If info=True, include selection/search indicators."""
+    S = '\u2500'
+    move(row, 1)
+    clear_line()
+
+    sel_count = len(selected) if info else 0
+    search = search_query if info and search_mode else None
+    label_str = ' {} '.format(label)
+
+    # Build the line segment by segment, tracking column position
+    pos = 0
+
+    # -- positions 1-2: separator
+    set_style(fg=8)
+    n = min(2, cols)
+    write(S * n)
+    pos = n
+
+    # -- position 3: selection count [N] in bold cyan
+    if sel_count > 0 and pos < cols:
+        sel_str = '[{}]'.format(sel_count)
+        set_style(fg=6, bold=True)
+        write(sel_str[:cols - pos])
+        pos += len(sel_str)
+        set_style(fg=8)
+
+    # -- separator fill to position 7 (before search at 8)
+    if pos < 7 and pos < cols:
+        write(S * min(7 - pos, cols - pos))
+        pos = min(7, cols)
+
+    # -- position 8: search prompt + query
+    if search is not None and pos < cols:
+        prompt = '/'
+        set_style(fg=11, bg=4, bold=True)
+        write(prompt[:cols - pos])
+        pos += len(prompt)
+        if pos < cols:
+            reset_style()
+            write(search[:cols - pos])
+            pos += len(search)
+        set_style(fg=8)
+
+    # -- separator fill to label
+    label_start = cols - len(label_str) - 1
+    if label_start < pos + 1:
+        label_start = pos + 1
+    if pos < label_start and pos < cols:
+        write(S * min(label_start - pos, cols - pos))
+        pos = min(label_start, cols)
+
+    # -- label
+    if pos < cols:
+        avail = cols - pos
+        write(label_str[:avail])
+        pos += min(len(label_str), avail)
+
+    # -- trailing separator
+    if pos < cols:
+        write(S * (cols - pos))
+
+    reset_style()
+
+
+def _pane_info_flags(layout):
+    """Return (sub_info, prev_info) booleans: which pane's separator is the info row."""
+    ir = layout['info_row']
+    return (layout['sub_height'] > 0 and layout['sub_top'] == ir,
+            layout['prev_height'] > 0 and layout['prev_top'] == ir)
+
+
+def render_full():
+    """Full screen redraw."""
+    global needs_redraw
+
+    write('\033[2J')
+    layout = layout_panes()
+    sub_info, prev_info = _pane_info_flags(layout)
+    render_list(layout['list_top'], layout['list_height'], layout['cols'])
+    render_subtickets(layout['sub_top'], layout['sub_height'], layout['cols'], info=sub_info)
+    render_preview(layout['prev_top'], layout['prev_height'], layout['cols'], info=prev_info)
+    flush()
+    needs_redraw = set()
+
+
+def render_partial():
+    """Selective redraw based on needs_redraw flags."""
+    global needs_redraw
+
+    if 'all' in needs_redraw:
+        render_full()
+        return
+
+    layout = layout_panes()
+    sub_info, prev_info = _pane_info_flags(layout)
+
+    if 'list' in needs_redraw:
+        render_list(layout['list_top'], layout['list_height'], layout['cols'])
+    if 'subtickets' in needs_redraw:
+        render_subtickets(layout['sub_top'], layout['sub_height'], layout['cols'], info=sub_info)
+    if 'preview' in needs_redraw:
+        render_preview(layout['prev_top'], layout['prev_height'], layout['cols'], info=prev_info)
+    if 'info' in needs_redraw:
+        # Redraw just the info separator line
+        ir = layout['info_row']
+        if ir > 0:
+            if sub_info:
+                _render_sep(ir, layout['cols'], 'Children', info=True)
+            elif prev_info:
+                label = 'Error' if error_text else ('Help' if help_mode else 'Preview')
+                _render_sep(ir, layout['cols'], label, info=True)
+
+    flush()
+    needs_redraw = set()
+
+
+_HELP_TEXT = """\
+plan-tui -- Terminal UI for plan tickets
+
+NAVIGATION
+  j, Down          Cursor down
+  k, Up            Cursor up
+  g, Home          First item
+  G, End           Last item
+  PgUp, PgDn       Page up/down
+  Right            Expand node
+  Left             Collapse node
+  Alt-Right        Expand siblings recursively
+  Alt-Left         Collapse siblings recursively
+  Enter            Toggle expand/collapse
+  Alt-Down         Scope down into ticket
+  Alt-Up           Scope up to parent
+
+PREVIEW
+  Space            Scroll preview page down
+  b                Scroll preview page up
+  Shift-Down       Scroll preview line down
+  Shift-Up         Scroll preview line up
+  Ctrl-P           Toggle preview pane
+
+SEARCH
+  /                Enter search mode
+  Enter            Next match
+  Shift-Enter      Previous match
+  Esc, Ctrl-C      Exit search mode
+
+SELECTION
+  Tab              Toggle select
+  Ctrl-A           Select all visible
+  Ctrl-N           Deselect all
+
+ACTIONS
+  s                Change status
+  c                Close ticket
+  o                Reopen ticket
+  e                Edit in editor
+  E                Edit recursively
+  n                Create new ticket
+  m                Move selected tickets
+  v                View in pager
+  V                View recursively
+
+OTHER
+  ?                Help (toggle)
+  q                Quit
+  Esc, Ctrl-C      Cancel / back to normal / quit
+  Ctrl-L           Refresh"""
+
+
+# }}} # SOURCE END: 050-render.py
+
+# SOURCE START: 060-actions.py {{{
+##############################################################################
+# Actions — operations triggered by keybindings
+##############################################################################
+
+_KNOWN_STATUSES = [
+    'open', 'in-progress', 'assigned', 'blocked', 'reviewing', 'testing',
+    'backlog', 'deferred', 'future', 'someday', 'wishlist', 'paused', 'on-hold',
+    'done', 'wontfix',
+]
+
+
+def _show_error(err):
+    """Show error text in the preview pane. Cleared on next keypress."""
+    global error_text, _preview_scroll, needs_redraw
+    error_text = err
+    _preview_scroll = 0
+    needs_redraw = needs_redraw | {'preview'}
+
+
+def _status_bar_message(msg):
+    """Show an action prompt on the info separator — bold yellow on blue, rest separator."""
+    layout = layout_panes()
+    row = layout['info_row']
+    cols = layout['cols']
+    if row <= 0:
+        return
+    S = '\u2500'
+    move(row, 1)
+    clear_line()
+    set_style(fg=11, bg=4, bold=True)
+    write(msg[:cols])
+    pos = len(msg)
+    if pos < cols:
+        set_style(fg=8)
+        write(S * (cols - pos))
+    reset_style()
+    flush()
+
+
+def _read_string(prompt):
+    """Read a string from the user on the info separator. Returns string or None if cancelled."""
+    buf = ''
+    layout = layout_panes()
+    row = layout['info_row']
+    cols = layout['cols']
+    if row <= 0:
+        return None
+    S = '\u2500'
+    while True:
+        move(row, 1)
+        clear_line()
+        # Prompt in bold yellow on blue
+        set_style(fg=11, bg=4, bold=True)
+        write(prompt[:cols])
+        pos = len(prompt)
+        # Input in normal text
+        if pos < cols:
+            _sb_style()
+            remaining = cols - pos
+            write(buf[:remaining])
+            pos += min(len(buf), remaining)
+        # Fill rest with separator
+        if pos < cols:
+            set_style(fg=8)
+            write(S * (cols - pos))
+        reset_style()
+        flush()
+
+        key = read_key()
+        if key == 'enter':
+            return buf
+        elif key in ('esc', 'ctrl-c'):
+            return None
+        elif key == 'backspace':
+            if buf:
+                buf = buf[:-1]
+        elif len(key) == 1 and key.isprintable():
+            buf += key
+
+
+def action_close():
+    """Close selected tickets, or cursor ticket if nothing selected."""
+    global selected, needs_redraw
+    if selected:
+        ids = list(selected)
+    else:
+        t = cursor_ticket()
+        if t is None:
+            return
+        ids = [t['id']]
+    ids = [i for i in ids if i != 0]
+    if not ids:
+        return
+    err = plan_close(ids)
+    if err:
+        _show_error(err)
+        return
+    selected.discard(0)
+    reload()
+
+
+def action_reopen():
+    """Reopen selected tickets, or cursor ticket if nothing selected."""
+    global selected, needs_redraw
+    if selected:
+        ids = list(selected)
+    else:
+        t = cursor_ticket()
+        if t is None:
+            return
+        ids = [t['id']]
+    ids = [i for i in ids if i != 0]
+    if not ids:
+        return
+    err = plan_reopen(ids)
+    if err:
+        _show_error(err)
+        return
+    reload()
+
+
+def action_status():
+    """Status selection mini-mode."""
+    global needs_redraw
+
+    # Determine affected ids
+    if selected:
+        ids = [i for i in selected if i != 0]
+    else:
+        t = cursor_ticket()
+        if t is None:
+            return
+        ids = [t['id']]
+        ids = [i for i in ids if i != 0]
+    if not ids:
+        return
+
+    status_list = _KNOWN_STATUSES + ['custom...']
+    status_cursor = 0
+    layout = layout_panes()
+    cols, _ = term_size()
+
+    while True:
+        # Render status list in the preview pane area
+        top = layout['prev_top']
+        height = layout['prev_height']
+        for i in range(height):
+            move(top + i, 1)
+            clear_line()
+            idx = i
+            if idx < len(status_list):
+                label = status_list[idx]
+                if idx == status_cursor:
+                    set_style(reverse=True)
+                    write(('  ' + label).ljust(cols)[:cols])
+                    reset_style()
+                else:
+                    write('  ' + label)
+            # else: blank line already cleared
+        flush()
+
+        key = read_key()
+        if key in ('j', 'down'):
+            if status_cursor < len(status_list) - 1:
+                status_cursor += 1
+        elif key in ('k', 'up'):
+            if status_cursor > 0:
+                status_cursor -= 1
+        elif key in ('g', 'home'):
+            status_cursor = 0
+        elif key in ('G', 'end'):
+            status_cursor = len(status_list) - 1
+        elif key == 'enter':
+            break
+        elif key in ('esc', 'ctrl-c'):
+            needs_redraw = {'all'}
+            return
+
+    chosen = status_list[status_cursor]
+
+    if chosen == 'custom...':
+        chosen = _read_string('Status: ')
+        if chosen is None or chosen.strip() == '':
+            needs_redraw = {'all'}
+            return
+        chosen = chosen.strip()
+
+    err = plan_status(ids, chosen)
+    if err:
+        _show_error(err)
+        return
+    reload()
+
+
+def action_edit(recursive=False):
+    """Edit the ticket under cursor."""
+    t = cursor_ticket()
+    if t is None:
+        return
+    term_suspend()
+    plan_edit(t['id'], recursive=recursive)
+    term_resume()
+    reload()
+
+
+def action_create():
+    """Create a new ticket with position prompt."""
+    global needs_redraw
+
+    _status_bar_message('Create: \u2191before \u2193after \u2190first child \u2192last child  (Esc cancel)')
+
+    key = read_key()
+    if key in ('esc', 'ctrl-c'):
+        needs_redraw = {'all'}
+        return
+    mode_map = {
+        'up': 'before', 'i': 'before', 'k': 'before',
+        'down': 'after', 'a': 'after', 'j': 'after',
+        'left': 'first', 'I': 'first',
+        'right': 'last', 'A': 'last',
+    }
+    mode = mode_map.get(key)
+    if mode is None:
+        needs_redraw = {'all'}
+        return
+
+    t = cursor_ticket()
+    if t is None:
+        needs_redraw = {'all'}
+        return
+    cursor_id = t['id']
+    if cursor_id == 0:
+        # Try to use first real ticket
+        vis = visible_tickets()
+        found = False
+        for vt in vis:
+            if vt['id'] != 0:
+                cursor_id = vt['id']
+                found = True
+                break
+        if not found:
+            needs_redraw = {'all'}
+            return
+
+    term_suspend()
+    plan_create(mode, cursor_id)
+    term_resume()
+    reload()
+
+
+def action_view(recursive=False):
+    """View ticket in a pager."""
+    t = cursor_ticket()
+    if t is None:
+        return
+    tid = t['id']
+
+    # Build plan command for getting text
+    if tid == 0:
+        args = [PLAN_BIN, 'project', 'get']
+    else:
+        args = [PLAN_BIN, str(tid), 'get']
+        if recursive:
+            args = [PLAN_BIN, str(tid), '-r', 'get']
+
+    # Detect pager
+    pager = None
+    for candidate in ('batcat', 'bat'):
+        path = shutil.which(candidate)
+        if path:
+            pager = [path, '--language=md', '--style=plain', '--paging=always']
+            break
+    if pager is None:
+        env_pager = os.environ.get('PAGER', '')
+        if env_pager:
+            pager = [env_pager]
+        else:
+            pager = ['less']
+
+    term_suspend()
+    try:
+        plan_proc = subprocess.Popen(args, stdout=subprocess.PIPE)
+        pager_proc = subprocess.Popen(pager, stdin=plan_proc.stdout)
+        plan_proc.stdout.close()
+        pager_proc.wait()
+        plan_proc.wait()
+    except Exception:
+        pass
+    term_resume()
+
+
+def action_move():
+    """Move selected tickets relative to cursor."""
+    global selected, needs_redraw
+
+    if not selected:
+        _status_bar_message('Select tickets to move first')
+        read_key()
+        needs_redraw = {'all'}
+        return
+
+    t = cursor_ticket()
+    if t is None or t['id'] == 0:
+        _status_bar_message('Move cursor to a destination ticket')
+        read_key()
+        needs_redraw = {'all'}
+        return
+    dest_id = t['id']
+
+    _status_bar_message('Move: \u2191before \u2193after \u2190first child \u2192last child  (Esc cancel)')
+
+    key = read_key()
+    if key in ('esc', 'ctrl-c'):
+        needs_redraw = {'all'}
+        return
+    relation_map = {
+        'up': 'before', 'i': 'before',
+        'down': 'after', 'a': 'after',
+        'left': 'first', 'I': 'first',
+        'right': 'last', 'A': 'last',
+    }
+    relation = relation_map.get(key)
+    if relation is None:
+        needs_redraw = {'all'}
+        return
+
+    ids = [i for i in selected if i != 0 and i != dest_id]
+    if not ids:
+        needs_redraw = {'all'}
+        return
+
+    err = plan_move(ids, relation, dest_id)
+    if err:
+        _show_error(err)
+        return
+    selected.clear()
+    reload()
+
+
+def action_help():
+    """Toggle help mode — shows help text in the preview pane."""
+    global help_mode, _preview_scroll, needs_redraw
+    help_mode = not help_mode
+    _preview_scroll = 0
+    needs_redraw = needs_redraw | {'preview'}
+# }}} # SOURCE END: 060-actions.py
+
+# SOURCE START: 070-main.py {{{
+##############################################################################
+# Main Loop & Entry Point
+##############################################################################
+
+
+def _search_next(start, direction=1):
+    """Find the next matching ticket index from start in the given direction.
+
+    direction=1 for forward, -1 for backward. Wraps around.
+    Returns the index or None if no match.
+    """
+    vis = visible_tickets()
+    if not vis or not search_query:
+        return None
+    q = search_query.lower()
+    n = len(vis)
+    for step in range(1, n + 1):
+        idx = (start + step * direction) % n
+        if q in vis[idx].get('title', '').lower():
+            return idx
+    return None
+
+
+def _search_jump_nearest():
+    """Jump cursor to the nearest match from the current position (forward first)."""
+    global cursor
+    idx = _search_next(cursor - 1, 1)  # start before cursor so cursor itself matches
+    if idx is not None:
+        cursor = idx
+
+
+def _handle_search_key(key):
+    """Handle a keypress while in search mode."""
+    global search_query, search_mode, cursor, needs_redraw
+
+    if key == 'enter':
+        # Find next match forward from current cursor
+        idx = _search_next(cursor, 1)
+        if idx is not None:
+            cursor = idx
+            needs_redraw = needs_redraw | {'list'}
+            update_preview()
+
+    elif key in ('shift-enter', 'alt-enter'):
+        # Find previous match backward from current cursor
+        idx = _search_next(cursor, -1)
+        if idx is not None:
+            cursor = idx
+            needs_redraw = needs_redraw | {'list'}
+            update_preview()
+
+    elif key in ('esc', 'ctrl-c'):
+        search_mode = False
+        needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif key == 'backspace':
+        if search_query:
+            search_query = search_query[:-1]
+            if search_query:
+                _search_jump_nearest()
+            needs_redraw = needs_redraw | {'list', 'info'}
+            update_preview()
+        else:
+            search_mode = False
+            needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif len(key) == 1 and key.isprintable():
+        search_query += key
+        _search_jump_nearest()
+        needs_redraw = needs_redraw | {'list', 'info'}
+        update_preview()
+
+
+def _handle_normal_key(key):
+    """Handle a keypress in normal mode."""
+    global cursor, scope, expanded, selected, search_mode, search_query
+    global needs_redraw, _visible_dirty, show_preview, _preview_scroll, help_mode, error_text
+
+    # Async preview load completed — consume result on main thread
+    if key == '_notify':
+        apply_preview_result()
+        return None
+
+    # Error mode: scrollable, any non-scroll key dismisses
+    if error_text and key not in ('shift-up', 'shift-down', 'space', 'b'):
+        error_text = ''
+        _preview_scroll = 0
+        needs_redraw = needs_redraw | {'preview'}
+        return None
+
+    # In help mode, shift-up/down scroll help; ? toggles off; anything else exits
+    if help_mode and key not in ('shift-up', 'shift-down', 'space', 'b', '?', 'f1', 'ctrl-p'):
+        help_mode = False
+        _preview_scroll = 0
+        needs_redraw = needs_redraw | {'preview'}
+        return None
+
+    vis = visible_tickets()
+    max_idx = len(vis) - 1 if vis else 0
+
+    if key in ('j', 'down'):
+        if cursor < max_idx:
+            cursor += 1
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key in ('k', 'up'):
+        if cursor > 0:
+            cursor -= 1
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key in ('g', 'home'):
+        cursor = 0
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key in ('G', 'end'):
+        cursor = max_idx
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key == 'pgup':
+        layout = layout_panes()
+        page_size = layout['list_height']
+        cursor = max(0, cursor - page_size)
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key == 'pgdn':
+        layout = layout_panes()
+        page_size = layout['list_height']
+        cursor = min(max_idx, cursor + page_size)
+        needs_redraw = needs_redraw | {'list'}
+        update_preview()
+
+    elif key == 'enter':
+        t = cursor_ticket()
+        if t is not None and t.get('has_children'):
+            saved = _cursor_id()
+            tid = t['id']
+            if tid in expanded:
+                expanded.discard(tid)
+            else:
+                expanded.add(tid)
+            _visible_dirty = True
+            _cursor_to_id(saved)
+            needs_redraw = needs_redraw | {'list'}
+            update_preview()
+
+    elif key == 'right':
+        # Expand one node
+        t = cursor_ticket()
+        if t is not None and t.get('has_children') and t['id'] not in expanded:
+            saved = _cursor_id()
+            expanded.add(t['id'])
+            _visible_dirty = True
+            _cursor_to_id(saved)
+            needs_redraw = needs_redraw | {'list'}
+            update_preview()
+
+    elif key == 'left':
+        # Collapse one node, or move to parent if already collapsed / no children
+        t = cursor_ticket()
+        if t is not None and t['id'] in expanded:
+            saved = _cursor_id()
+            expanded.discard(t['id'])
+            _visible_dirty = True
+            _cursor_to_id(saved)
+            needs_redraw = needs_redraw | {'list'}
+            update_preview()
+        elif t is not None and t['id'] != 0:
+            # Move cursor to parent in visible list
+            parent_id = t['parent']
+            if parent_id is not None:
+                vis = visible_tickets()
+                for i, vt in enumerate(vis):
+                    if vt['id'] == parent_id:
+                        cursor = i
+                        needs_redraw = needs_redraw | {'list'}
+                        update_preview()
+                        break
+
+    elif key == 'alt-right':
+        # Expand recursively: all siblings at cursor's level (and their descendants)
+        # On Project (id=0): expand everything
+        t = cursor_ticket()
+        if t is not None:
+            saved = _cursor_id()
+            if t['id'] == 0:
+                for tk in all_tickets:
+                    if tk.get('has_children'):
+                        expanded.add(tk['id'])
+            else:
+                parent_id = t['parent']
+                def _expand_tree(tid):
+                    expanded.add(tid)
+                    for tk in all_tickets:
+                        if tk['parent'] == tid and tk.get('has_children'):
+                            _expand_tree(tk['id'])
+                for tk in all_tickets:
+                    if tk['parent'] == parent_id and tk.get('has_children'):
+                        _expand_tree(tk['id'])
+            _visible_dirty = True
+            _cursor_to_id(saved)
+            needs_redraw = {'all'}
+            update_preview()
+
+    elif key == 'alt-left':
+        # Collapse recursively: all siblings at cursor's level (and their descendants)
+        # On Project (id=0): collapse everything
+        t = cursor_ticket()
+        if t is not None:
+            saved = _cursor_id()
+            if t['id'] == 0:
+                expanded.clear()
+            else:
+                parent_id = t['parent']
+                to_collapse = set()
+                def _collect_tree(tid):
+                    to_collapse.add(tid)
+                    for tk in all_tickets:
+                        if tk['parent'] == tid:
+                            _collect_tree(tk['id'])
+                for tk in all_tickets:
+                    if tk['parent'] == parent_id:
+                        _collect_tree(tk['id'])
+                expanded -= to_collapse
+            _visible_dirty = True
+            _cursor_to_id(saved)
+            needs_redraw = {'all'}
+            update_preview()
+
+    elif key == 'alt-down':
+        # Scope down into ticket
+        t = cursor_ticket()
+        if t is not None and t['id'] > 0:
+            scope = t['id']
+            cursor = 0
+            expanded.clear()
+            _visible_dirty = True
+            reload()
+
+    elif key == 'alt-up':
+        # Scope up to parent — cursor stays on the ticket we're leaving
+        if scope is not None:
+            old_scope = scope
+            parent_id = None
+            for t in all_tickets:
+                if t['id'] == scope:
+                    parent_id = t['parent']
+                    break
+            if parent_id is None or parent_id == 0:
+                scope = None
+            else:
+                scope = parent_id
+            cursor = 0
+            expanded.clear()
+            _visible_dirty = True
+            reload()
+            _cursor_to_id(old_scope)
+
+    elif key == 'ctrl-p':
+        # Toggle preview pane
+        show_preview = not show_preview
+        needs_redraw = {'all'}
+
+    elif key == 'shift-down':
+        # Scroll preview pane down (works for ticket preview and help)
+        lines = _preview_lines()
+        layout = layout_panes()
+        content_lines = max(0, layout['prev_height'] - 1)
+        max_scroll = max(0, len(lines) - content_lines)
+        if _preview_scroll < max_scroll:
+            _preview_scroll += 1
+            needs_redraw = needs_redraw | {'preview'}
+
+    elif key == 'shift-up':
+        # Scroll preview pane up (works for ticket preview and help)
+        if _preview_scroll > 0:
+            _preview_scroll -= 1
+            needs_redraw = needs_redraw | {'preview'}
+
+    elif key == 'space':
+        # Scroll preview one page down
+        lines = _preview_lines()
+        layout = layout_panes()
+        content_lines = max(1, layout['prev_height'] - 1)
+        max_scroll = max(0, len(lines) - content_lines)
+        _preview_scroll = min(max_scroll, _preview_scroll + content_lines)
+        needs_redraw = needs_redraw | {'preview'}
+
+    elif key == 'b':
+        # Scroll preview one page up
+        layout = layout_panes()
+        content_lines = max(1, layout['prev_height'] - 1)
+        _preview_scroll = max(0, _preview_scroll - content_lines)
+        needs_redraw = needs_redraw | {'preview'}
+
+    elif key == '/':
+        search_mode = True
+        search_query = ''
+        needs_redraw = needs_redraw | {'info'}
+
+    elif key == 'tab':
+        t = cursor_ticket()
+        if t is not None and t['id'] != 0:
+            tid = t['id']
+            if tid in selected:
+                selected.discard(tid)
+            else:
+                selected.add(tid)
+            # Move cursor down
+            if cursor < max_idx:
+                cursor += 1
+            needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif key == 'btab':
+        t = cursor_ticket()
+        if t is not None and t['id'] != 0:
+            tid = t['id']
+            if tid in selected:
+                selected.discard(tid)
+            else:
+                selected.add(tid)
+            # Move cursor up
+            if cursor > 0:
+                cursor -= 1
+            needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif key == 'ctrl-a':
+        for t in vis:
+            if t['id'] != 0:
+                selected.add(t['id'])
+        needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif key == 'ctrl-n':
+        selected.clear()
+        needs_redraw = needs_redraw | {'list', 'info'}
+
+    elif key == 's':
+        action_status()
+
+    elif key == 'c':
+        action_close()
+
+    elif key == 'o':
+        action_reopen()
+
+    elif key == 'e':
+        action_edit()
+
+    elif key == 'E':
+        action_edit(recursive=True)
+
+    elif key == 'n':
+        action_create()
+
+    elif key == 'm':
+        action_move()
+
+    elif key == 'v':
+        action_view()
+
+    elif key == 'V':
+        action_view(recursive=True)
+
+    elif key in ('?', 'f1'):
+        action_help()
+
+    elif key == 'q':
+        return 'quit'
+
+    elif key in ('esc', 'ctrl-c'):
+        # Esc/Ctrl-C: cancel current mode first, then quit
+        if help_mode:
+            help_mode = False
+            _preview_scroll = 0
+            needs_redraw = needs_redraw | {'preview'}
+        elif selected:
+            selected.clear()
+            needs_redraw = needs_redraw | {'list', 'info'}
+        else:
+            return 'quit'
+
+    elif key == 'ctrl-l':
+        cache_invalidate()
+        reload()
+        needs_redraw = {'all'}
+
+    return None
+
+
+def main(initial_scope):
+    global scope, cursor, expanded, selected, search_query, search_mode, needs_redraw
+    global g_resize_flag
+
+    scope = initial_scope
+    reload()
+    render_full()
+
+    while True:
+        key = read_key()
+
+        # Check resize flag
+        if g_resize_flag:
+            g_resize_flag = False
+            needs_redraw = {'all'}
+
+        if search_mode:
+            _handle_search_key(key)
+        else:
+            result = _handle_normal_key(key)
+            if result == 'quit':
+                return
+
+        # Check resize flag again (might have been set during key handling)
+        if g_resize_flag:
+            g_resize_flag = False
+            needs_redraw = {'all'}
+
+        if needs_redraw:
+            render_partial()
+
+
+if __name__ == '__main__':
+    if not sys.stdin.isatty():
+        sys.exit('plan-tui requires a terminal')
+    # Parse arguments: optional -f/--file and optional ticket ID for initial scope
+    _initial_scope = None
+    _args = sys.argv[1:]
+    while _args:
+        if _args[0] in ('-f', '--file'):
+            if len(_args) < 2:
+                sys.exit('-f/--file requires an argument')
+            os.environ['PLAN_MD'] = _args[1]
+            _args = _args[2:]
+        elif _args[0] in ('-h', '--help'):
+            print('Usage: plan-tui [-f FILE] [TICKET_ID]')
+            sys.exit(0)
+        elif _args[0].isdigit():
+            _initial_scope = int(_args[0])
+            _args = _args[1:]
+        else:
+            sys.exit('Unknown argument: {}'.format(_args[0]))
+    try:
+        term_init()
+        main(_initial_scope)
+    finally:
+        term_restore()
+# }}} # SOURCE END: 070-main.py
+

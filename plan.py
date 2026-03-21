@@ -44,9 +44,9 @@ except ImportError:
 # }}} # SOURCE END: 010-preambula.py
 
 # SOURCE START: 015-version+.sh {{{
-VERSION_A = [1, 0, 2]
-VERSION_STR = "1.0.2"
-VERSION_DATE = "2026-03-20"
+VERSION_A = [1, 0, 3]
+VERSION_STR = "1.0.3"
+VERSION_DATE = "2026-03-21"
 # }}} # SOURCE END: 015-version+.sh
 
 # SOURCE START: 020-constants.py {{{
@@ -4507,7 +4507,9 @@ def _handle_create(project, cmd_args, req, output):
         prefill_attrs = {}
         if expr_str:
             tmp = Ticket(0, "", "Task")
-            apply_mod(tmp, project, f"set({expr_str})")
+            # Use a detached project to prevent side effects (e.g. move
+            # reparenting the temporary ticket into the real tree).
+            apply_mod(tmp, None, f"set({expr_str})")
             prefill_title = tmp.title
             prefill_body = '\n'.join(l.strip() for l in tmp.body_lines if l.strip())
             for k, v in tmp.attrs.items():
@@ -5489,7 +5491,7 @@ _PLUGIN_FILES = {
     '.claude-plugin/plugin.json': r'''{
   "name": "claude-plan",
   "description": "Integrate the plan CLI ticket tracker with Claude Code for structured planning and team coordination",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "license": "MIT",
   "keywords": ["planning", "tickets", "task-tracking", "team-coordination"]
 }
