@@ -144,8 +144,11 @@ def dispatch(project, req, output):
             _handle_create(project, cmd_args, req, output)
             return True
         if cmd_name == "edit":
-            _handle_edit_command(project, cmd_args, req)
-            return True
+            result = _handle_edit_command(project, cmd_args, req)
+            # Non-interactive: start returns False (no plan modification),
+            # accept returns True/None, abort handled in main().
+            # Interactive edit always modifies.
+            return result if result is not None else True
         if cmd_name == "check":
             _handle_check(project, output)
             return False

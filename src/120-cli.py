@@ -122,6 +122,18 @@ def _parse_flag(argv, i, n, req):
     if arg in ("-e", "--edit"):
         req.flags["edit"] = True
         return i + 1
+    if arg == "--start":
+        req.flags["start"] = True
+        return i + 1
+    if arg == "--restart":
+        req.flags["restart"] = True
+        return i + 1
+    if arg == "--accept":
+        req.flags["accept"] = True
+        return i + 1
+    if arg == "--abort":
+        req.flags["abort"] = True
+        return i + 1
     return None
 
 
@@ -423,4 +435,5 @@ def _is_keyword(arg):
         "--force", "-r", "--recursive", "-n", "-q", "--format",
         "--title", "--text", "--attr", "-p", "--parent", "-h", "--help",
         "-e", "--edit", "--quiet",
+        "--start", "--restart", "--accept", "--abort",
     )

@@ -14,6 +14,11 @@ def main(argv=None):
             print(line)
         return
 
+    # Handle --version anywhere in argv
+    if "--version" in argv:
+        print(f"{VERSION_STR} {VERSION_DATE}")
+        return
+
     # Handle install/uninstall before parsing (no plan file needed)
     if argv[0] == "install":
         if len(argv) < 2:
@@ -46,8 +51,22 @@ def main(argv=None):
 
     # Discover file
     filepath = discover_file(flags)
+    abs_filepath = os.path.abspath(filepath)
+    plan_dir = os.path.dirname(abs_filepath)
+    plan_filename = os.path.basename(abs_filepath)
+
+    # Handle --abort before acquiring flock (it only touches temp files)
+    for req in requests:
+        if (req.command is not None and req.command[0] == "edit"
+                and req.flags.get("abort")):
+            cmd_args = req.command[1]
+            _handle_edit_abort(cmd_args, plan_dir, plan_filename)
+            return
 
     # Determine if all requests are read-only
+    # edit --start is NOT read-only (it reads plan data to export)
+    # edit --accept is NOT read-only (it modifies the plan)
+    # edit --abort is handled above (before flock)
     is_read_only = all(
         (req.command is not None and req.command[0] in {"check", "help", "h"}) or
         (req.command is None and req.verb in ("get", "list"))
@@ -59,8 +78,17 @@ def main(argv=None):
     try:
         if _has_flock and (os.path.exists(filepath) or not is_read_only):
             lock_fd = open(filepath, "a")
-            fcntl.flock(lock_fd,
-                        fcntl.LOCK_SH if is_read_only else fcntl.LOCK_EX)
+            lock_mode = fcntl.LOCK_SH if is_read_only else fcntl.LOCK_EX
+            for _attempt in range(20):
+                try:
+                    fcntl.flock(lock_fd, lock_mode | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            else:
+                raise SystemExit(
+                    f"Error: could not acquire lock on {filepath} "
+                    f"(timed out after 2 seconds)")
 
         # Read file or bootstrap
         file_exists = os.path.exists(filepath)
@@ -88,6 +116,10 @@ def main(argv=None):
         project = parse(text)
         if not project.title:
             _bootstrap_project(project)
+
+        # Store plan directory and filename on project for handlers to access
+        project._plan_dir = plan_dir
+        project._plan_filename = plan_filename
 
         # Dispatch all requests
         output = []

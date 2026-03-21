@@ -95,10 +95,13 @@ def _substitute_bulk_text(text, placeholder_map, id_for_missing):
         line = lines[line_idx].rstrip("\n")
         lines[line_idx] = f"{line} {{#{allocated_id}}}"
 
-    # Step 2: Rejoin and replace all placeholders with real IDs
+    # Step 2: Rejoin and replace all placeholder references with real IDs.
+    # Use word-boundary lookahead to avoid prefix collisions
+    # (e.g. #auth must not match inside #auth-svc).
     result = "\n".join(lines)
     for placeholder, real_id in placeholder_map.items():
-        result = result.replace(placeholder, real_id)
+        result = re.sub(re.escape(placeholder) + r'(?![a-zA-Z0-9_-])',
+                        real_id, result)
 
     # Step 3: Check for any remaining undefined placeholders (non-numeric #id)
     remaining = [m for m in re.findall(r"#([a-zA-Z0-9_-]+)", result)

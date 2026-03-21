@@ -836,12 +836,355 @@ def _parse_create_template(text):
     return result
 
 
+def _edit_export_content(project, ticket, recursive):
+    """Export ticket content for editing (shared by interactive and non-interactive).
+
+    Returns the exported text string (indent-normalized to 0).
+    """
+    out = []
+    if recursive:
+        _regenerate_ticket(ticket, out)
+    else:
+        _regenerate_ticket_only(ticket, out)
+
+    # Normalize indent to 0
+    min_indent = float('inf')
+    for line in out:
+        if line.strip():
+            min_indent = min(min_indent, _indent_of(line))
+    if min_indent > 0 and min_indent != float('inf'):
+        out = [line[min_indent:] if len(line) >= min_indent else line
+               for line in out]
+
+    return "\n".join(out)
+
+
+def _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename):
+    """Handle 'edit --start' — export ticket to temp file for non-interactive editing."""
+    if not cmd_args:
+        raise SystemExit("Error: edit --start requires a ticket ID")
+    node_id = cmd_args[0]
+    node = project.lookup(node_id)
+    if node is None:
+        raise SystemExit(f"Error: ticket #{node_id} not found")
+    if not isinstance(node, Ticket):
+        raise SystemExit("Error: non-interactive edit is only supported for tickets")
+
+    recursive = req.flags.get("recursive", False)
+
+    # Check for existing edit file
+    existing = _edit_file_glob(plan_dir, plan_filename, ticket_id=node_id)
+    if existing:
+        raise SystemExit(
+            f"Error: edit already in progress for #{node_id}. "
+            f"Use --restart {node_id} or --abort {node_id}.")
+
+    # Export content
+    text = _edit_export_content(project, node, recursive)
+    content_hash = _edit_content_hash(text)
+    flags = set()
+    if recursive:
+        flags.add("r")
+    filename = _edit_file_encode(plan_filename, node_id, flags, content_hash)
+    filepath = os.path.join(plan_dir, filename)
+
+    with open(filepath, "w") as f:
+        f.write(text)
+
+    print(f"Edit {filename} then run \"plan edit --accept\" when done.")
+
+
+def _handle_edit_restart(project, cmd_args, req, plan_dir, plan_filename):
+    """Handle 'edit --restart' — abort existing edit and start fresh."""
+    if not cmd_args:
+        raise SystemExit("Error: edit --restart requires a ticket ID")
+    node_id = cmd_args[0]
+
+    # Delete existing edit files for this ticket (idempotent)
+    existing = _edit_file_glob(plan_dir, plan_filename, ticket_id=node_id)
+    for _fname, fpath in existing:
+        os.unlink(fpath)
+
+    # Now do the same as --start (skip existence check)
+    node = project.lookup(node_id)
+    if node is None:
+        raise SystemExit(f"Error: ticket #{node_id} not found")
+    if not isinstance(node, Ticket):
+        raise SystemExit("Error: non-interactive edit is only supported for tickets")
+
+    recursive = req.flags.get("recursive", False)
+
+    text = _edit_export_content(project, node, recursive)
+    content_hash = _edit_content_hash(text)
+    flags = set()
+    if recursive:
+        flags.add("r")
+    filename = _edit_file_encode(plan_filename, node_id, flags, content_hash)
+    filepath = os.path.join(plan_dir, filename)
+
+    with open(filepath, "w") as f:
+        f.write(text)
+
+    print(f"Edit {filename} then run \"plan edit --accept\" when done.")
+
+
+def _handle_edit_accept(project, cmd_args, req, plan_dir, plan_filename):
+    """Handle 'edit --accept' — apply edited temp file."""
+    ticket_id = cmd_args[0] if cmd_args else None
+
+    # Find edit files
+    edit_files = _edit_file_glob(plan_dir, plan_filename, ticket_id=ticket_id)
+    if not edit_files:
+        if ticket_id:
+            raise SystemExit(f"Error: no edit in flight for #{ticket_id}")
+        raise SystemExit("Error: no edit files found")
+    if len(edit_files) > 1 and ticket_id is None:
+        names = ", ".join(f for f, _ in edit_files)
+        raise SystemExit(
+            f"Error: multiple edits in flight ({names}). "
+            f"Specify a ticket ID: plan edit --accept ID")
+
+    fname, fpath = edit_files[0]
+    decoded = _edit_file_decode(fname, plan_filename)
+    if decoded is None:
+        raise SystemExit(f"Error: cannot parse edit filename: {fname}")
+    tid, edit_flags, original_hash = decoded
+
+    # Look up ticket
+    node = project.lookup(tid)
+    if node is None:
+        raise SystemExit(f"Error: ticket #{tid} no longer exists")
+    if not isinstance(node, Ticket):
+        raise SystemExit(f"Error: #{tid} is not a ticket")
+
+    recursive = "r" in edit_flags
+
+    # Re-export current content and verify hash
+    current_text = _edit_export_content(project, node, recursive)
+    current_hash = _edit_content_hash(current_text)
+
+    if current_hash != original_hash:
+        raise SystemExit(
+            f"Error: content of #{tid} has changed since export. "
+            f"Run \"plan edit --restart {tid}\" to get fresh content.")
+
+    # Read edited file
+    with open(fpath) as f:
+        new_text = f.read()
+
+    if not new_text.strip():
+        os.unlink(fpath)
+        output = []
+        _edit_list_remaining(plan_dir, plan_filename, output)
+        for line in output:
+            print(line)
+        return False
+
+    # Apply changes using the same logic as interactive edit
+    if isinstance(node, Ticket):
+        _apply_edit_to_ticket(project, node, new_text, recursive)
+
+    # Delete temp file on success
+    os.unlink(fpath)
+
+    # List remaining edit files
+    output = []
+    _edit_list_remaining(plan_dir, plan_filename, output)
+    for line in output:
+        print(line)
+
+    return True
+
+
+def _handle_edit_abort(cmd_args, plan_dir, plan_filename):
+    """Handle 'edit --abort' — delete temp file without applying."""
+    ticket_id = cmd_args[0] if cmd_args else None
+
+    edit_files = _edit_file_glob(plan_dir, plan_filename, ticket_id=ticket_id)
+    if not edit_files:
+        # Idempotent — no error if nothing to abort
+        if ticket_id:
+            print(f"No edit in flight for #{ticket_id}.")
+        else:
+            print("No edit files found.")
+        return
+
+    if len(edit_files) > 1 and ticket_id is None:
+        names = ", ".join(f for f, _ in edit_files)
+        raise SystemExit(
+            f"Error: multiple edits in flight ({names}). "
+            f"Specify a ticket ID: plan edit --abort ID")
+
+    fname, fpath = edit_files[0]
+    os.unlink(fpath)
+    print(f"Aborted edit: {fname}")
+
+    output = []
+    _edit_list_remaining(plan_dir, plan_filename, output, exclude_path=fpath)
+    for line in output:
+        print(line)
+
+
+def _apply_edit_to_ticket(project, ticket, new_text, include_children):
+    """Apply edited text to a ticket (shared logic for accept flow).
+
+    Reuses the same parsing logic as _handle_edit_recursive.
+    """
+    # Check for new tickets (bulk creation within edit)
+    headers = _scan_bulk_headers(new_text)
+    has_new = any(h[2] for h in headers)
+    new_ids = set()
+    saved_next_id = project.next_id
+    saved_metadata = (project.sections["metadata"].get_attr("next_id")
+                      if "metadata" in project.sections else None)
+    if has_new:
+        placeholder_map, new_ids, id_for_missing, next_counter = (
+            _allocate_bulk_ids(project, headers, mode="edit")
+        )
+        new_text = _substitute_bulk_text(
+            new_text, placeholder_map, id_for_missing
+        )
+        project.next_id = next_counter
+        if "metadata" in project.sections:
+            project.sections["metadata"].set_attr(
+                "next_id", str(project.next_id)
+            )
+
+    try:
+        # Re-indent the edited text to the ticket's original indent level
+        edited_lines = new_text.rstrip('\n').split('\n')
+        indent_prefix = " " * ticket.indent_level
+        reindented = []
+        for line in edited_lines:
+            if line.strip():
+                reindented.append(indent_prefix + line)
+            else:
+                reindented.append("")
+
+        # Save original children before unregistering (for non-recursive edit)
+        saved_children = ticket.children if not include_children else None
+
+        # Unregister the old ticket from id_map
+        if include_children:
+            _unregister_recursive(project, ticket)
+        else:
+            if str(ticket.node_id) in project.id_map:
+                del project.id_map[str(ticket.node_id)]
+            if ticket.comments:
+                _unregister_recursive(project, ticket.comments)
+
+        # Re-parse the edited subtree
+        new_tickets = []
+        _parse_ticket_region(reindented, project, new_tickets, ticket.parent, 0)
+
+        if not new_tickets:
+            return
+
+        # The first parsed ticket replaces the original
+        new_root = new_tickets[0]
+        new_root.indent_level = ticket.indent_level
+        new_root.parent = ticket.parent
+        new_root._rank = ticket._rank
+        new_root.dirty = True
+
+        # Restore original children if not editing recursively
+        if saved_children is not None:
+            new_root.children = saved_children
+            for child in saved_children:
+                child.parent = new_root
+
+        # Mark all descendants dirty and fix body indentation
+        def _fixup(t):
+            t.dirty = True
+            content_indent = " " * (t.indent_level + 2)
+            fixed = []
+            for bl in t.body_lines:
+                if bl.strip():
+                    fixed.append(content_indent + bl.lstrip())
+                else:
+                    fixed.append("")
+            t.body_lines = fixed
+            for c in t.children:
+                _fixup(c)
+        for nt in new_tickets:
+            _fixup(nt)
+
+        # Fill defaults for new tickets created during edit
+        if new_ids:
+            now = _now()
+            def _fill_new_defaults(t):
+                if t.node_id in new_ids:
+                    if "status" not in t.attrs:
+                        t.attrs["status"] = "open"
+                    if "created" not in t.attrs:
+                        t.attrs["created"] = now
+                    if "updated" not in t.attrs:
+                        t.attrs["updated"] = now
+                    if t._rank is None:
+                        siblings = (t.parent.children
+                                    if t.parent and isinstance(t.parent, Ticket)
+                                    else project.tickets)
+                        t._rank = rank_last(siblings)
+                    t.dirty = True
+                for c in t.children:
+                    _fill_new_defaults(c)
+            for nt in new_tickets:
+                _fill_new_defaults(nt)
+
+        # Replace in parent's children list or project.tickets
+        if ticket.parent:
+            children = ticket.parent.children
+            idx = next((i for i, c in enumerate(children) if c is ticket), None)
+            if idx is not None:
+                children[idx:idx+1] = new_tickets
+            ticket.parent.dirty = True
+        else:
+            idx = next((i for i, t in enumerate(project.tickets) if t is ticket), None)
+            if idx is not None:
+                project.tickets[idx:idx+1] = new_tickets
+            if "tickets" in project.sections:
+                project.sections["tickets"].dirty = True
+
+        # Resolve ephemeral 'move' attrs on edited tickets
+        _resolve_move_attrs(new_tickets, project)
+
+    except Exception:
+        if has_new:
+            project.next_id = saved_next_id
+            if "metadata" in project.sections and saved_metadata is not None:
+                project.sections["metadata"].set_attr("next_id", saved_metadata)
+        raise
+
+
 def _handle_edit_command(project, cmd_args, req):
-    """Handle 'edit' command — edit a single ticket/node in $EDITOR.
+    """Handle 'edit' command — edit a single ticket/node in $EDITOR or non-interactively.
 
     Usage: edit ID [-r]
-    -r includes children in the edit buffer.
+           edit --start ID [-r]
+           edit --restart ID [-r]
+           edit --accept [ID]
+           edit --abort [ID]
     """
+    plan_dir = getattr(project, '_plan_dir', None)
+    if plan_dir is None:
+        plan_dir = os.getcwd()
+    plan_filename = getattr(project, '_plan_filename', '.PLAN.md')
+
+    # Non-interactive dispatch
+    if req.flags.get("start"):
+        _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename)
+        return False  # no plan modification
+    if req.flags.get("restart"):
+        _handle_edit_restart(project, cmd_args, req, plan_dir, plan_filename)
+        return False  # no plan modification
+    if req.flags.get("accept"):
+        result = _handle_edit_accept(project, cmd_args, req, plan_dir, plan_filename)
+        return True if result else False
+    if req.flags.get("abort"):
+        _handle_edit_abort(cmd_args, plan_dir, plan_filename)
+        return False  # no plan modification
+
+    # Interactive edit (existing behavior)
     if not cmd_args:
         raise SystemExit("Error: edit requires a ticket ID")
     if len(cmd_args) > 1:
@@ -976,6 +1319,7 @@ def _handle_edit_recursive(project, ticket, editor, include_children=True):
         new_root = new_tickets[0]
         new_root.indent_level = ticket.indent_level
         new_root.parent = ticket.parent
+        new_root._rank = ticket._rank
         new_root.dirty = True
 
         # Restore original children if not editing recursively
@@ -1712,6 +2056,22 @@ def _handle_check(project, output):
 
     for t in project.tickets:
         _check_body_indent(t, f"#{t.node_id}")
+
+    # Check for in-flight edit files
+    plan_dir = getattr(project, '_plan_dir', None)
+    plan_filename = getattr(project, '_plan_filename', '.PLAN.md')
+    if plan_dir:
+        edit_files = _edit_file_glob(plan_dir, plan_filename)
+        for fname, fpath in edit_files:
+            mtime = os.path.getmtime(fpath)
+            age = time.time() - mtime
+            if age < 60:
+                age_str = f"{int(age)}s ago"
+            elif age < 3600:
+                age_str = f"{int(age / 60)}m ago"
+            else:
+                age_str = f"{int(age / 3600)}h ago"
+            errors.append(f"In-flight edit: {fname} (modified {age_str})")
 
     if errors:
         for e in errors:

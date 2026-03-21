@@ -1,8 +1,13 @@
-plan edit — Edit in external editor
+plan edit — Edit in external editor (or non-interactively for agents)
 
 Usage:
   plan edit ID                   Edit single ticket
   plan edit ID -r                Edit entire subtree in one editor
+  plan edit --start ID           Export ticket to a temp file (non-interactive)
+  plan edit --start ID -r        Export ticket + children to a temp file
+  plan edit --restart ID         Abort existing edit and start fresh
+  plan edit --accept [ID]        Apply edited temp file and clean up
+  plan edit --abort [ID]         Delete temp file without applying
 
 Opens the ticket or node content in $EDITOR for interactive editing.
 Saves changes back to the plan file on exit. ID can be a ticket
@@ -12,11 +17,29 @@ When editing recursively (-r), you can add new tickets by writing
 * ## headers without an ID or with {#newXXX} placeholders.
 New ticket IDs, timestamps, and status are auto-assigned.
 
+Non-interactive (agent) workflow:
+  --start creates a .PLAN-edit-{ID}-{hash}.md file next to .PLAN.md.
+  Edit that file, then run --accept to apply and clean up.
+  --accept and --abort accept an optional ID; if omitted and exactly
+  one edit file exists, it is used automatically.
+  --abort and --restart are idempotent (no error if no edit is in flight).
+  A hash mismatch on --accept means the base changed; use --restart.
+
 Flags:
   -r, --recursive    Edit the entire subtree (ticket + children) recursively.
+  --start ID         Export ticket content to a temp file for non-interactive editing.
+  --restart ID       Abort any existing edit for ID and start a fresh export.
+  --accept [ID]      Apply the edited temp file to the plan and delete the temp file.
+  --abort [ID]       Delete the temp file without applying any changes.
 
 Examples:
-  plan edit 5                    Edit ticket #5
+  plan edit 5                    Edit ticket #5 interactively
   plan edit 5 -r                 Edit ticket #5 and all children
   plan edit description          Edit project description section
   plan edit project              Edit the project root node
+  plan edit --start 5            Export ticket #5 to a temp file
+  plan edit --start 5 -r         Export ticket #5 and children to a temp file
+  plan edit --accept             Apply the edit (when only one edit is in flight)
+  plan edit --accept 5           Apply the edit for ticket #5
+  plan edit --abort 5            Discard the edit for ticket #5
+  plan edit --restart 5          Abort existing edit and start fresh for ticket #5

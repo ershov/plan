@@ -54,6 +54,17 @@ plan 5 comment add "Needs review"      # Add comment
 plan 5 add "Another paragraph"         # Append to body text
 ```
 
+## Non-Interactive Editing (body restructure / subtree)
+
+```bash
+plan edit --start 5            # Export ticket #5 to a temp file
+plan edit --start 5 -r         # Export ticket #5 + children
+# Edit the file, then:
+plan edit --accept             # Apply (auto-detects if one edit in flight)
+plan edit --abort 5            # Discard without applying
+plan edit --restart 5          # Abort + re-export fresh
+```
+
 ## Organizing
 
 ```bash
