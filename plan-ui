@@ -39,8 +39,10 @@ Examples:
   plzf 5 -r               Browse ticket #5 and all descendants
   plzf -q is_active       Browse only active tickets
   plzf -q 'assignee == "alice"'
+  plzf -f other.md        Browse tickets in other.md
 
-  --help, -h   Show this help.
+  -f, --file FILE  Use specific plan file.
+  --help, -h       Show this help.
 EOF
 }
 
@@ -431,9 +433,24 @@ _cleanup_state() {
 
 main() {
   _setup_state
-  # Store command-line args as base selectors/filters (one per line, for safe reading)
-  if [[ $# -gt 0 ]]; then
-    printf '%s\n' "$@" > "$PLZF_ARGS"
+  # Extract -f/--file and export as PLAN_MD for all plan invocations
+  local remaining=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--file)
+        [[ $# -lt 2 ]] && die "-f/--file requires an argument"
+        export PLAN_MD="$2"
+        shift 2
+        ;;
+      *)
+        remaining+=("$1")
+        shift
+        ;;
+    esac
+  done
+  # Store remaining args as base selectors/filters (one per line, for safe reading)
+  if [[ ${#remaining[@]} -gt 0 ]]; then
+    printf '%s\n' "${remaining[@]}" > "$PLZF_ARGS"
   fi
 
   local _rl="+reload($SELF --function list)"
@@ -446,7 +463,7 @@ main() {
 
   "$SELF" --function list | \
   fzf \
-    --layout=reverse-list --no-sort -i --ansi --filepath-word --multi \
+    --layout=reverse-list --no-sort -i --ansi --multi \
     --no-select-1 --exit-0 \
     --delimiter '\t' --with-nth 2.. \
     --preview-window="$_pw" \

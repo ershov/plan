@@ -63,6 +63,7 @@ You are implementing ticket #N: [TITLE]
    If the issue is out of scope of this ticket, create it elsewhere.
 5. When done: plan N close
 6. Report back: what you implemented, files changed, any issues.
+7. For body restructuring: plan edit --start N, edit the file, plan edit --accept.
 ```
 
 ## Integration

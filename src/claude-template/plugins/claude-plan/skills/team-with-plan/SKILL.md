@@ -58,6 +58,7 @@ Use the `plan` CLI to manage your assigned work:
 - Check for more: plan list ready (or plan list order)
 - Create subtasks if needed: plan create PARENT 'title="New subtask", assignee="YOUR-NAME"'
 - If blocked: plan N comment add "Blocked: reason"
+- For body restructuring: plan edit --start N, edit the file, plan edit --accept
 ```
 
 ## Integration

@@ -101,6 +101,7 @@ plan list --format 'f"{indent}#{id} [{status}] {title}"'
 
 If new work surfaces: `plan create PARENT 'title="Handle newly discovered case"'`
 If a task is unnecessary: `plan N close wontfix`
+If you need to restructure a ticket body or subtree: `plan edit --start N`, edit the file, `plan edit --accept`.
 
 ## Replacing TodoWrite
 

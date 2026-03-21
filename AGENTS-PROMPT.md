@@ -88,6 +88,7 @@ plan N unlink blocked M          # Remove dependency link
 plan N ~ 'delete("attr_name")'   # Remove attribute
 plan N comment add "text"        # Add comment
 plan N add "text"                # Append to body
+plan edit --start N              # Editing the ticket non-interactively. Further instructions will follow.
 ```
 
 ### Organizing tickets
@@ -141,6 +142,7 @@ Chain mutators with commas: `set(status="done"), add(text="note")`
 7. **Validate after bulk changes**: Run `plan check` after making multiple modifications.
 8. **Prefer DSL mod for multi-attribute updates**: `plan N ~ 'set(status="in-progress", assignee="alice")'` is one atomic write vs. two separate commands.
 9. **Batch operations**: Pass multiple IDs to a verb (`plan 5 6 7 close`) or chain commands with `";"` (`plan 5 status done ";" 6 status in-progress`) — the file is read and written once.
+10. **Non-interactive body editing**: Use `plan edit --start N` to export a ticket to a temp file, edit it, then commit back.
 
 ## Error Handling
 

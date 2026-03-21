@@ -25,6 +25,8 @@ python3 plan.py 1 close done
 
 ## Installation
 
+Download files from https://github.com/ershov/plan/releases/latest
+
 Copy `plan.py` anywhere on your `PATH`:
 
 ```bash

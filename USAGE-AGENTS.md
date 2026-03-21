@@ -14,19 +14,22 @@ with no interactive prompts, no editor, and no TTY required.
 4. [Work Loop](#work-loop)
 5. [Creating and Structuring Tickets](#creating-and-structuring-tickets)
 6. [Modifying Tickets](#modifying-tickets)
-7. [Querying and Filtering](#querying-and-filtering)
-8. [Bulk Operations](#bulk-operations)
-9. [Multi-Agent Coordination](#multi-agent-coordination)
-10. [Piping and Stdin Patterns](#piping-and-stdin-patterns)
-11. [Error Handling](#error-handling)
-12. [Recipes](#recipes)
+7. [Non-Interactive Editing](#non-interactive-editing)
+8. [Querying and Filtering](#querying-and-filtering)
+9. [Bulk Operations](#bulk-operations)
+10. [Multi-Agent Coordination](#multi-agent-coordination)
+11. [Piping and Stdin Patterns](#piping-and-stdin-patterns)
+12. [Error Handling](#error-handling)
+13. [Recipes](#recipes)
 
 ---
 
 ## Principles
 
-1. **No interactive commands.** Never use `edit` — it launches `$EDITOR`.
-   Use `add`, `mod`/`~`, and `create` instead.
+1. **No interactive commands.** Never use `edit` without `--start` — it launches `$EDITOR`.
+   Use `add`, `mod`/`~`, and `create` for attribute and body changes.
+   Use `edit --start` / `edit --accept` only when you need to restructure
+   a ticket's markdown body or rearrange a subtree.
 2. **Prefer `add` and `mod`/`~` over `replace`.** `add` appends text,
    `~ 'set(key=val)'` sets attributes. Use `replace --force` only when you
    need to overwrite an entire body and `add` won't work (e.g. the existing
@@ -288,7 +291,7 @@ plan 6 move last         # Do last
 
 ## Modifying Tickets
 
-All modifications use non-interactive commands. Never use `edit`.
+All modifications use non-interactive commands. Do not use `edit` without `--start`.
 
 ### Setting attributes (`mod` / `~`)
 
@@ -387,6 +390,60 @@ plan 5 ~ '[set(assignee="alice"), link("blocked", 3)]'
 
 # Batch via semicolons
 plan 5 ~ 'set(status="in-progress")' \; 6 ~ 'set(status="open")'
+```
+
+---
+
+## Non-Interactive Editing
+
+Use `edit --start` / `edit --accept` when you need to restructure a ticket's
+markdown body or rearrange a subtree — cases where `add` and `~ 'set(text=...)'`
+are insufficient (e.g. reordering existing content, adding child tickets inline).
+
+### Workflow
+
+```bash
+# 1. Export the ticket to a temp file
+plan edit --start 5
+
+# 2. Edit the file at the path printed by --start
+#    (e.g. .PLAN-edit-5-a3f9.md next to .PLAN.md)
+
+# 3. Apply and clean up
+plan edit --accept 5
+# Or, if only one edit is in flight:
+plan edit --accept
+```
+
+To export a ticket and all its children in one file:
+
+```bash
+plan edit --start 5 -r
+# ... edit the file ...
+plan edit --accept 5
+```
+
+### Aborting and restarting
+
+```bash
+# Discard the edit without applying
+plan edit --abort 5
+
+# Start over (abort existing + export fresh)
+plan edit --restart 5
+```
+
+`--abort` and `--restart` are idempotent — they succeed even if no edit is in flight.
+
+### Error: hash mismatch
+
+If `--accept` fails with a hash mismatch error, the base content changed since
+`--start` was called. Use `--restart` to get a fresh export:
+
+```bash
+plan edit --restart 5
+# ... re-edit the file ...
+plan edit --accept 5
 ```
 
 ---

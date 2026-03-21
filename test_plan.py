@@ -2,6 +2,7 @@
 """Tests for plan.py — Markdown Ticket Tracker."""
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -4325,6 +4326,98 @@ class TestEditVerb(unittest.TestCase):
         body4 = "\n".join(t4.body_lines)
         self.assertIn("Third task done", body4)
 
+    def test_edit_middle_ticket_roundtrip(self):
+        """Edit ticket #2 (middle of top-level list) — roundtrip preserves all."""
+        def transform(text):
+            return text.replace("Second task body.", "MIDDLE EDITED.")
+        p, text = self._run_edit(SAMPLE_DOC, "2", transform)
+
+        # Edited ticket changed
+        t2 = p.lookup("2")
+        self.assertIn("MIDDLE EDITED", "\n".join(t2.body_lines))
+        self.assertEqual(t2.title, "Second task")
+        self.assertEqual(t2.node_id, 2)
+        self.assertEqual(t2.get_attr("status"), "in-progress")
+
+        # Siblings before and after are untouched
+        t1 = p.lookup("1")
+        self.assertIn("First task body", "\n".join(t1.body_lines))
+        self.assertEqual(len(t1.children), 1)
+        t3 = p.lookup("3")
+        self.assertIn("Subtask A body", "\n".join(t3.body_lines))
+        t4 = p.lookup("4")
+        self.assertIn("Third task done", "\n".join(t4.body_lines))
+
+        # Top-level ordering: #1, #2, #4 (file order from SAMPLE_DOC)
+        top_ids = [t.node_id for t in p.tickets]
+        self.assertEqual(top_ids, [1, 2, 4])
+
+        # Second roundtrip: serialize→parse again is stable
+        text2 = plan.serialize(p)
+        p2 = plan.parse(text2)
+        self.assertEqual(
+            "\n".join(p2.lookup("2").body_lines),
+            "\n".join(t2.body_lines))
+        self.assertEqual([t.node_id for t in p2.tickets], [1, 2, 4])
+
+    def test_edit_middle_child_roundtrip(self):
+        """Edit a child in the middle of a hierarchy — roundtrip preserves all."""
+        # Build a doc with parent #1 having three children
+        doc = textwrap.dedent("""\
+        # P {#project}
+        ## Metadata {#metadata}
+            next_id: 5
+        ## Tickets {#tickets}
+        * ## Ticket: Epic: Parent {#1}
+
+              status: open
+
+          Parent body.
+
+          * ## Ticket: Task: Child A {#2}
+
+                status: open
+
+            Child A body.
+
+          * ## Ticket: Task: Child B {#3}
+
+                status: open
+
+            Child B body.
+
+          * ## Ticket: Task: Child C {#4}
+
+                status: open
+
+            Child C body.
+        """)
+        # Edit the middle child #3
+        def transform(text):
+            return text.replace("Child B body.", "B IS EDITED.")
+        p, text = self._run_edit(doc, "3", transform)
+
+        t3 = p.lookup("3")
+        self.assertIn("B IS EDITED", "\n".join(t3.body_lines))
+        self.assertEqual(t3.node_id, 3)
+
+        # Siblings untouched
+        self.assertIn("Child A body", "\n".join(p.lookup("2").body_lines))
+        self.assertIn("Child C body", "\n".join(p.lookup("4").body_lines))
+
+        # Parent untouched, children order preserved
+        parent = p.lookup("1")
+        self.assertIn("Parent body", "\n".join(parent.body_lines))
+        child_ids = [c.node_id for c in parent.children]
+        self.assertEqual(child_ids, [2, 3, 4])
+
+        # Serialize→parse roundtrip is stable
+        text2 = plan.serialize(p)
+        p2 = plan.parse(text2)
+        child_ids2 = [c.node_id for c in p2.lookup("1").children]
+        self.assertEqual(child_ids2, [2, 3, 4])
+        self.assertIn("B IS EDITED", "\n".join(p2.lookup("3").body_lines))
+
     def test_edit_multiline_body(self):
         """Edit that produces multi-line body works correctly."""
         def transform(text):
@@ -4499,6 +4592,117 @@ class TestEditVerb(unittest.TestCase):
 
         self.assertNotIn("Subtask A", captured['content'],
             "Children should not appear in non-recursive edit buffer")
+
+
+class TestEditIdentityPreservesOrder(unittest.TestCase):
+    """Test that identity edit (no changes) preserves ticket ordering."""
+
+    def _run_edit(self, doc_text, node_id, transform):
+        """Run _handle_edit_command with a mock editor that applies transform."""
+        from unittest.mock import patch
+        p = plan.parse(doc_text)
+        req = plan.ParsedRequest()
+        req.command = ("edit", [node_id])
+
+        def mock_editor(cmd, **kwargs):
+            path = cmd[-1]
+            with open(path) as f:
+                content = f.read()
+            with open(path, 'w') as f:
+                f.write(transform(content))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch('subprocess.run', side_effect=mock_editor):
+            plan._handle_edit_command(p, [node_id], req)
+
+        result_text = plan.serialize(p)
+        return plan.parse(result_text), result_text
+
+    def test_identity_edit_preserves_ticket_order(self):
+        """An identity edit (EDITOR=true) must not reorder tickets."""
+        doc = textwrap.dedent("""\
+        # Project {#project}
+
+        ## Metadata {#metadata}
+
+            next_id: 4
+
+        ## Tickets {#tickets}
+
+        * ## Ticket: Task: Alpha {#1}
+
+              status: open
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+
+        * ## Ticket: Task: Beta {#2}
+
+              status: open
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+
+        * ## Ticket: Task: Gamma {#3}
+
+              status: open
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+        """)
+
+        # Identity transform — no changes
+        _, result = self._run_edit(doc, "3", lambda text: text)
+
+        # Extract ticket order from serialized output
+        ids = re.findall(r'\{#(\d+)\}', result)
+        # Filter to only ticket IDs (skip project, metadata, etc.)
+        ticket_ids = [i for i in ids if i in ('1', '2', '3')]
+        self.assertEqual(ticket_ids, ['1', '2', '3'],
+            f"Identity edit of #3 reordered tickets: {ticket_ids}")
+
+    def test_identity_edit_last_ticket_stays_last(self):
+        """Identity edit of the last ticket must not move it to the front."""
+        doc = textwrap.dedent("""\
+        # Project {#project}
+
+        ## Metadata {#metadata}
+
+            next_id: 4
+
+        ## Tickets {#tickets}
+
+        * ## Ticket: Task: First {#1}
+
+              status: done
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+
+          First body.
+
+        * ## Ticket: Task: Second {#2}
+
+              status: done
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+
+          Second body.
+
+        * ## Ticket: Task: Third {#3}
+
+              status: done
+              created: 2024-01-01 00:00:00 UTC
+              updated: 2024-01-01 00:00:00 UTC
+
+          Third body.
+        """)
+
+        _, result = self._run_edit(doc, "3", lambda text: text)
+
+        lines = result.split('\n')
+        ticket_lines = [(i, l) for i, l in enumerate(lines)
+                        if '## Ticket:' in l]
+        # #3 should still be last
+        titles = [l for _, l in ticket_lines]
+        self.assertTrue(titles[-1].strip().endswith('{#3}'),
+            f"#3 should be last ticket but order is: {titles}")
 
 
 class TestEditRecursive(unittest.TestCase):
@@ -6500,16 +6704,19 @@ class TestInstallUninstall(unittest.TestCase):
         self.assertIn("Existing content.", content)
         self.assertIn("## Task tracking", content)
 
-    def test_install_local_skips_existing_section(self):
-        """install local skips CLAUDE.md if section already present."""
+    def test_install_local_replaces_existing_section(self):
+        """install local replaces existing task tracking section."""
         claude_md = os.path.join(self.tmpdir, "CLAUDE.md")
         with open(claude_md, "w") as f:
-            f.write("## Task tracking\n\nAlready here.\n")
+            f.write("## Task tracking\n\nOld content.\n")
         self._quiet(plan._handle_install, "local")
         with open(claude_md) as f:
             content = f.read()
         # Should not duplicate
         self.assertEqual(content.count("## Task tracking"), 1)
+        # Old content replaced with current section
+        self.assertNotIn("Old content.", content)
+        self.assertIn("plan create", content)
 
     def test_install_local_copies_binary(self):
         """install local copies binary when plan not on PATH."""
@@ -6598,6 +6805,308 @@ class TestInstallUninstall(unittest.TestCase):
         self.assertEqual(remaining, [],
                          f"Unexpected files after uninstall: {remaining}")
 
+    def test_install_user_creates_cache_plugin(self):
+        """install user puts plugin files in ~/.claude/plugins/cache/."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools", "claude-plan", plan._get_plugin_version())
+        self.assertTrue(os.path.isdir(cache_dir))
+        self.assertTrue(os.path.isfile(
+            os.path.join(cache_dir, ".claude-plugin", "plugin.json")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(cache_dir, "skills", "planning-with-plan", "SKILL.md")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(cache_dir, "hooks", "hooks.json")))
+
+    def test_install_user_registers_in_installed_plugins(self):
+        """install user adds entry to installed_plugins.json."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        self.assertTrue(os.path.isfile(ip_path))
+        with open(ip_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["version"], 2)
+        self.assertIn("claude-plan@plan-tools", data["plugins"])
+        entry = data["plugins"]["claude-plan@plan-tools"][0]
+        self.assertEqual(entry["scope"], "user")
+        self.assertEqual(entry["version"], plan._get_plugin_version())
+
+    def test_install_user_enables_plugin(self):
+        """install user adds claude-plan@plan-tools to enabledPlugins."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertTrue(settings["enabledPlugins"].get("claude-plan@plan-tools"))
+
+    def test_uninstall_user_removes_cache(self):
+        """uninstall user removes plugin from cache."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools")
+        self.assertFalse(os.path.exists(cache_dir))
+
+    def test_uninstall_user_removes_from_installed_plugins(self):
+        """uninstall user removes entry from installed_plugins.json."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        with open(ip_path) as f:
+            data = json.load(f)
+        self.assertNotIn("claude-plan@plan-tools", data.get("plugins", {}))
+
+    def test_uninstall_user_removes_enabled_plugin(self):
+        """uninstall user removes from enabledPlugins."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertNotIn("claude-plan@plan-tools",
+                         settings.get("enabledPlugins", {}))
+
+    def test_uninstall_user_cleans_legacy_remnants(self):
+        """uninstall user removes old-style ~/.claude/plugins/claude-plan/ dir."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+        # Create old-style plugin dir
+        old_dir = os.path.join(fake_home, ".claude", "plugins", "claude-plan")
+        os.makedirs(old_dir, exist_ok=True)
+        with open(os.path.join(old_dir, "dummy"), "w") as f:
+            f.write("old")
+        # Old-style settings
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({
+                "enabledPlugins": {"claude-plan": True},
+                "plugins": [old_dir],
+            }, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_uninstall, "user")
+        self.assertFalse(os.path.exists(old_dir))
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertNotIn("claude-plan", settings.get("enabledPlugins", {}))
+        self.assertNotIn("plugins", settings)
+
+    def test_roundtrip_user_install_uninstall(self):
+        """Full user install then uninstall cleans up properly."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        orig_path = os.environ.get("PATH", "")
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home, "PATH": ""}):
+            self._quiet(plan._handle_install, "user")
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_uninstall, "user")
+        # Cache dir for plan-tools should be gone
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools")
+        self.assertFalse(os.path.exists(cache_dir))
+        # installed_plugins.json should have no plan entry
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        with open(ip_path) as f:
+            data = json.load(f)
+        self.assertNotIn("claude-plan@plan-tools", data.get("plugins", {}))
+
+    def _make_fake_home(self, settings=None, installed_plugins=None):
+        """Create a fake HOME with optional pre-existing config."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        if settings is not None:
+            os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+            with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+                json.dump(settings, f, indent=2)
+        if installed_plugins is not None:
+            os.makedirs(os.path.join(fake_home, ".claude", "plugins"), exist_ok=True)
+            with open(os.path.join(fake_home, ".claude", "plugins",
+                                   "installed_plugins.json"), "w") as f:
+                json.dump(installed_plugins, f, indent=2)
+        return fake_home
+
+    def test_install_user_into_existing_config(self):
+        """install user preserves existing plugins in all config files."""
+        existing_settings = {
+            "enabledPlugins": {"superpowers@claude-plugins-official": True},
+            "env": {"SOME_VAR": "1"},
+        }
+        existing_installed = {
+            "version": 2,
+            "plugins": {
+                "superpowers@claude-plugins-official": [{
+                    "scope": "user",
+                    "installPath": "/fake/path/superpowers/5.0.5",
+                    "version": "5.0.5",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                }],
+            },
+        }
+        fake_home = self._make_fake_home(existing_settings, existing_installed)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        # Our plugin is added
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertTrue(settings["enabledPlugins"].get("claude-plan@plan-tools"))
+        # Existing plugins are preserved
+        self.assertTrue(settings["enabledPlugins"].get(
+            "superpowers@claude-plugins-official"))
+        self.assertEqual(settings["env"]["SOME_VAR"], "1")
+        # installed_plugins.json: both entries exist
+        with open(os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")) as f:
+            data = json.load(f)
+        self.assertIn("superpowers@claude-plugins-official", data["plugins"])
+        self.assertIn("claude-plan@plan-tools", data["plugins"])
+
+    def test_uninstall_user_preserves_existing_config(self):
+        """uninstall user only removes plan entries, preserves everything else."""
+        existing_settings = {
+            "enabledPlugins": {
+                "superpowers@claude-plugins-official": True,
+                "claude-plan@plan-tools": True,
+            },
+            "env": {"SOME_VAR": "1"},
+        }
+        fake_home = self._make_fake_home(existing_settings)
+        # Set up cache + installed_plugins.json as if install had run
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools", "claude-plan", plan._get_plugin_version())
+        os.makedirs(os.path.join(cache_dir, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(cache_dir, ".claude-plugin", "plugin.json"), "w") as f:
+            json.dump({"name": "claude-plan", "version": plan._get_plugin_version()}, f)
+        installed = {
+            "version": 2,
+            "plugins": {
+                "superpowers@claude-plugins-official": [{
+                    "scope": "user",
+                    "installPath": "/fake/path/superpowers/5.0.5",
+                    "version": "5.0.5",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                }],
+                "claude-plan@plan-tools": [{
+                    "scope": "user",
+                    "installPath": cache_dir,
+                    "version": plan._get_plugin_version(),
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                }],
+            },
+        }
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        with open(ip_path, "w") as f:
+            json.dump(installed, f, indent=2)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_uninstall, "user")
+        # Our entries are gone
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertNotIn("claude-plan@plan-tools", settings["enabledPlugins"])
+        self.assertFalse(os.path.exists(cache_dir))
+        with open(ip_path) as f:
+            data = json.load(f)
+        self.assertNotIn("claude-plan@plan-tools", data["plugins"])
+        # Other entries are preserved
+        self.assertTrue(settings["enabledPlugins"].get(
+            "superpowers@claude-plugins-official"))
+        self.assertEqual(settings["env"]["SOME_VAR"], "1")
+        self.assertIn("superpowers@claude-plugins-official", data["plugins"])
+
+    def test_install_user_no_preexisting_claude_dir(self):
+        """install user works when ~/.claude/ does not exist at all."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        # Don't create .claude/ at all
+        os.makedirs(fake_home, exist_ok=True)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        # Cache plugin created
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools", "claude-plan", plan._get_plugin_version())
+        self.assertTrue(os.path.isdir(cache_dir))
+        # installed_plugins.json created
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        with open(ip_path) as f:
+            data = json.load(f)
+        self.assertIn("claude-plan@plan-tools", data["plugins"])
+        # settings.json created with enabledPlugins
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertTrue(settings["enabledPlugins"].get("claude-plan@plan-tools"))
+
+    def test_roundtrip_user_preserves_preexisting_state(self):
+        """install+uninstall returns config to its original state."""
+        original_settings = {
+            "enabledPlugins": {"superpowers@claude-plugins-official": True},
+            "env": {"SOME_VAR": "1"},
+        }
+        original_installed = {
+            "version": 2,
+            "plugins": {
+                "superpowers@claude-plugins-official": [{
+                    "scope": "user",
+                    "installPath": "/fake/path/superpowers/5.0.5",
+                    "version": "5.0.5",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                }],
+            },
+        }
+        fake_home = self._make_fake_home(original_settings, original_installed)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        # settings.json matches original
+        with open(os.path.join(fake_home, ".claude", "settings.json")) as f:
+            settings = json.load(f)
+        self.assertEqual(settings["enabledPlugins"],
+                         original_settings["enabledPlugins"])
+        self.assertEqual(settings["env"], original_settings["env"])
+        # installed_plugins.json matches original (our entry gone, theirs kept)
+        with open(os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")) as f:
+            data = json.load(f)
+        self.assertIn("superpowers@claude-plugins-official", data["plugins"])
+        self.assertNotIn("claude-plan@plan-tools", data["plugins"])
+        # No leftover cache dirs for plan-tools
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools")
+        self.assertFalse(os.path.exists(cache_dir))
+
     def test_install_invalid_scope(self):
         """install with invalid scope raises error."""
         with self.assertRaises(SystemExit):
@@ -6607,6 +7116,119 @@ class TestInstallUninstall(unittest.TestCase):
         """uninstall with invalid scope raises error."""
         with self.assertRaises(SystemExit):
             self._quiet(plan._handle_uninstall, "invalid")
+
+    # --- --version flag ---
+
+    def test_version_flag(self):
+        """--version prints VERSION_STR and exits."""
+        buf = io.StringIO()
+        with unittest.mock.patch('sys.stdout', buf):
+            plan.main(["--version"])
+        self.assertEqual(buf.getvalue().strip(), plan.VERSION_STR)
+
+    def test_version_flag_anywhere(self):
+        """--version anywhere in argv prints version and exits."""
+        buf = io.StringIO()
+        with unittest.mock.patch('sys.stdout', buf):
+            plan.main(["install", "--version", "local"])
+        self.assertEqual(buf.getvalue().strip(), plan.VERSION_STR)
+
+    # --- Multi-version uninstall ---
+
+    def test_uninstall_user_removes_all_versions(self):
+        """uninstall user removes ALL version directories, not just current."""
+        fake_home = self._make_fake_home({"enabledPlugins": {}})
+        version = plan._get_plugin_version()
+        cache_base = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                  "plan-tools", "claude-plan")
+        # Create multiple version dirs (simulate old installs)
+        for v in ["1.0.0", "1.0.50", version]:
+            vdir = os.path.join(cache_base, v)
+            os.makedirs(os.path.join(vdir, ".claude-plugin"), exist_ok=True)
+            with open(os.path.join(vdir, ".claude-plugin", "plugin.json"), "w") as f:
+                json.dump({"name": "claude-plan", "version": v}, f)
+        # installed_plugins.json points to current version only
+        ip_path = os.path.join(fake_home, ".claude", "plugins",
+                               "installed_plugins.json")
+        os.makedirs(os.path.dirname(ip_path), exist_ok=True)
+        with open(ip_path, "w") as f:
+            json.dump({"version": 2, "plugins": {
+                "claude-plan@plan-tools": [{
+                    "scope": "user",
+                    "installPath": os.path.join(cache_base, version),
+                    "version": version,
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                }],
+            }}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_uninstall, "user")
+        # ALL version dirs should be gone
+        self.assertFalse(os.path.exists(cache_base))
+        # plan-tools dir should be cleaned up too
+        self.assertFalse(os.path.exists(os.path.dirname(cache_base)))
+
+    def test_uninstall_user_removes_untracked_versions(self):
+        """uninstall user removes version dirs even if not in installed_plugins.json."""
+        fake_home = self._make_fake_home({"enabledPlugins": {}})
+        cache_base = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                  "plan-tools", "claude-plan")
+        # Create version dirs without any installed_plugins.json tracking
+        for v in ["1.0.0", "1.0.50"]:
+            vdir = os.path.join(cache_base, v)
+            os.makedirs(os.path.join(vdir, ".claude-plugin"), exist_ok=True)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_uninstall, "user")
+        self.assertFalse(os.path.exists(cache_base))
+
+    # --- Install overwrites existing version dir (repair) ---
+
+    def test_install_user_overwrites_same_version(self):
+        """install user overwrites files when same version dir already exists."""
+        fake_home = self._make_fake_home({"enabledPlugins": {}})
+        version = plan._get_plugin_version()
+        cache_dir = os.path.join(fake_home, ".claude", "plugins", "cache",
+                                 "plan-tools", "claude-plan", version)
+        # Pre-create with stale content
+        os.makedirs(os.path.join(cache_dir, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(cache_dir, ".claude-plugin", "plugin.json"), "w") as f:
+            f.write('{"stale": true}')
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        # File should be overwritten with current content
+        with open(os.path.join(cache_dir, ".claude-plugin", "plugin.json")) as f:
+            data = json.load(f)
+        self.assertEqual(data["name"], "claude-plan")
+        self.assertNotIn("stale", data)
+
+    # --- Binary update ---
+
+    def test_install_local_updates_existing_binary(self):
+        """install local overwrites existing binary at target path."""
+        bin_path = os.path.join(self.tmpdir, "plan")
+        with open(bin_path, "w") as f:
+            f.write("old content")
+        self._quiet(plan._handle_install, "local")
+        with open(bin_path) as f:
+            content = f.read()
+        self.assertNotEqual(content, "old content")
+        self.assertGreater(os.path.getsize(bin_path), 100)
+
+    # --- CLAUDE.md replace on reinstall ---
+
+    def test_install_local_replaces_section_preserves_other(self):
+        """install local replaces section but keeps other CLAUDE.md content."""
+        claude_md = os.path.join(self.tmpdir, "CLAUDE.md")
+        with open(claude_md, "w") as f:
+            f.write("# My Project\n\nKeep this.\n\n"
+                    "## Task tracking\n\nOld instructions.\n")
+        self._quiet(plan._handle_install, "local")
+        with open(claude_md) as f:
+            content = f.read()
+        self.assertIn("Keep this.", content)
+        self.assertNotIn("Old instructions.", content)
+        self.assertIn("plan create", content)
+        self.assertEqual(content.count("## Task tracking"), 1)
 
 
 class TestEditFlagParsing(unittest.TestCase):
@@ -7330,6 +7952,22 @@ class TestBulkScanning(unittest.TestCase):
         self.assertEqual(headers[0][1], "auth-service")
         self.assertTrue(headers[0][2])
 
+    def test_scan_digit_prefixed_id_is_placeholder(self):
+        """IDs starting with a digit but containing non-digits are placeholders."""
+        text = (
+            "* ## Ticket: Task: A {#1a}\n"
+            "* ## Ticket: Task: B {#2-auth}\n"
+            "* ## Ticket: Task: C {#3_task}\n"
+        )
+        headers = plan._scan_bulk_headers(text)
+        self.assertEqual(len(headers), 3)
+        for _, placeholder, is_new in headers:
+            self.assertTrue(is_new, f"'{placeholder}' should be treated as new")
+            self.assertIsNotNone(placeholder)
+        self.assertEqual(headers[0][1], "1a")
+        self.assertEqual(headers[1][1], "2-auth")
+        self.assertEqual(headers[2][1], "3_task")
+
     def test_scan_duplicate_placeholder_error(self):
         text = "* ## Ticket: Task: A {#newFoo}\n* ## Ticket: Task: B {#newFoo}\n"
         with self.assertRaises(SystemExit):
@@ -7558,6 +8196,49 @@ class TestBulkSubstitution(unittest.TestCase):
         self.assertIn("blocked:#10", result)
         self.assertIn("blocking:#11", result)
 
+    def test_substitute_prefix_collision(self):
+        """#auth must not match inside #auth-svc (prefix collision)."""
+        text = (
+            "* ## Ticket: Task: Auth {#auth}\n"
+            "    links: blocking:#auth-svc\n"
+            "* ## Ticket: Task: Auth Service {#auth-svc}\n"
+            "    links: blocked:#auth\n"
+        )
+        placeholder_map = {"#auth": "#1", "#auth-svc": "#2"}
+        result = plan._substitute_bulk_text(text, placeholder_map, {})
+        self.assertIn("{#1}", result)
+        self.assertIn("{#2}", result)
+        self.assertIn("blocking:#2", result)
+        self.assertIn("blocked:#1", result)
+        # Must NOT contain corrupted fragments like #1-svc
+        self.assertNotIn("#1-svc", result)
+
+    def test_substitute_prefix_collision_in_body(self):
+        """Body text references with prefix overlap resolve correctly."""
+        text = (
+            "  See #a and #ab for details.\n"
+        )
+        placeholder_map = {"#a": "#5", "#ab": "#6"}
+        result = plan._substitute_bulk_text(text, placeholder_map, {})
+        self.assertIn("#5 and #6", result)
+        # Must not corrupt #ab into #5b
+        self.assertNotIn("#5b", result)
+
+    def test_substitute_digit_prefixed_placeholder(self):
+        """Digit-prefixed non-numeric placeholders are resolved like any other."""
+        text = (
+            "* ## Ticket: Task: A {#1a}\n"
+            "    links: blocked:#2b\n"
+            "* ## Ticket: Task: B {#2b}\n"
+            "    links: blocking:#1a\n"
+        )
+        placeholder_map = {"#1a": "#10", "#2b": "#11"}
+        result = plan._substitute_bulk_text(text, placeholder_map, {})
+        self.assertIn("{#10}", result)
+        self.assertIn("{#11}", result)
+        self.assertIn("blocked:#11", result)
+        self.assertIn("blocking:#10", result)
+
 
 class TestParseBulkMarkdown(unittest.TestCase):
 
@@ -7655,6 +8336,58 @@ class TestParseBulkMarkdown(unittest.TestCase):
         db = tickets[1]
         self.assertIn(f"blocking:#{db.node_id}", auth.get_attr("links"))
         self.assertIn(f"blocked:#{auth.node_id}", db.get_attr("links"))
+
+    def test_create_prefix_collision_e2e(self):
+        """Placeholder that is a prefix of another resolves correctly e2e."""
+        project = self._project()
+        text = textwrap.dedent("""\
+        * ## Ticket: Task: Auth {#auth}
+
+              links: blocking:#auth-svc
+
+          Auth core.
+
+        * ## Ticket: Task: Auth Service {#auth-svc}
+
+              links: blocked:#auth
+
+          Auth service.
+        """)
+        tickets, _ = plan._parse_bulk_markdown(
+            text, project, parent=None, mode="create")
+        auth = tickets[0]
+        svc = tickets[1]
+        self.assertIn(f"blocking:#{svc.node_id}", auth.get_attr("links"))
+        self.assertIn(f"blocked:#{auth.node_id}", svc.get_attr("links"))
+        # Verify IDs are distinct
+        self.assertNotEqual(auth.node_id, svc.node_id)
+
+    def test_create_digit_prefixed_placeholders_e2e(self):
+        """IDs like {#1a} are user-defined placeholders, not numeric IDs."""
+        project = self._project()
+        text = textwrap.dedent("""\
+        * ## Ticket: Task: Step 1 {#1a}
+
+              links: blocking:#1b
+
+          First step.
+
+        * ## Ticket: Task: Step 2 {#1b}
+
+              links: blocked:#1a
+
+          Second step.
+        """)
+        tickets, new_ids = plan._parse_bulk_markdown(
+            text, project, parent=None, mode="create")
+        self.assertEqual(len(tickets), 2)
+        # Both treated as new (allocated numeric IDs)
+        self.assertEqual(len(new_ids), 2)
+        s1 = tickets[0]
+        s2 = tickets[1]
+        # Cross-references resolved to allocated numeric IDs
+        self.assertIn(f"blocking:#{s2.node_id}", s1.get_attr("links"))
+        self.assertIn(f"blocked:#{s1.node_id}", s2.get_attr("links"))
 
     def test_create_rejects_numeric_ids(self):
         project = self._project()
