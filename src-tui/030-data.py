@@ -205,16 +205,18 @@ def plan_edit(ticket_id, recursive=False):
         return 1
 
 
-def plan_create(mode, cursor_id):
+def plan_create(mode, cursor_id, recursive=False):
     """Create a new ticket. Returns subprocess return code.
 
     Does NOT suspend/resume terminal — caller handles that.
+    With recursive=True, passes -r for bulk creation.
     """
     try:
-        result = subprocess.run([
-            PLAN_BIN, 'create', '-e',
-            'title="New ticket", move="{} {}"'.format(mode, cursor_id),
-        ])
+        args = [PLAN_BIN, 'create', '-e']
+        if recursive:
+            args.append('-r')
+        args.append('title="New ticket", move="{} {}"'.format(mode, cursor_id))
+        result = subprocess.run(args)
         return result.returncode
     except Exception:
         return 1

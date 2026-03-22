@@ -15,6 +15,11 @@ needs_redraw = set()  # set of strings: 'list', 'subtickets', 'preview', 'status
 show_preview = True   # whether the preview pane is visible (Ctrl-P toggles)
 help_mode = False     # when True, preview pane shows help text instead of ticket
 error_text = ''       # when non-empty, preview pane shows error output
+insert_mode = False   # when True, showing "-- here --" marker for create/move
+insert_pos = 0        # gap position in visible list (1..N)
+insert_depth = 0      # depth of the insertion marker
+insert_callback = None  # callable(relation, dest_id) on confirm
+insert_label = ''       # 'create' or 'move' — shown in the marker
 _preview_scroll = 0   # scroll offset within the preview pane
 _last_preview_id = -1 # tracks which ticket ID the preview is cached for
 
@@ -305,3 +310,30 @@ def _cursor_to_id(saved_id):
         cursor = min(cursor, len(vis) - 1)
     else:
         cursor = 0
+
+
+def _ensure_visible_and_cursor(ticket_id):
+    """Expand ancestors so ticket_id is visible, then move cursor to it."""
+    global cursor, _visible_dirty
+    if ticket_id is None or ticket_id <= 0:
+        return
+    # Expand all ancestors of ticket_id
+    id_map = {t['id']: t for t in all_tickets}
+    tid = ticket_id
+    while True:
+        t = id_map.get(tid)
+        if t is None:
+            break
+        pid = t['parent']
+        if pid == 0 or pid == tid:
+            break
+        p = id_map.get(pid)
+        if p is not None and p.get('has_children'):
+            expanded.add(pid)
+        tid = pid
+    _visible_dirty = True
+    vis = visible_tickets()
+    for i, t in enumerate(vis):
+        if t['id'] == ticket_id:
+            cursor = i
+            return

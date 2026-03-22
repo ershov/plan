@@ -68,12 +68,24 @@ def render_list(top, height, cols):
     global _scroll_offset
 
     visible = visible_tickets()
+    cursor_pos = cursor
+
+    # In insert mode, inject the "-- here --" marker into the display list
+    if insert_mode:
+        marker = {
+            'id': -1, 'parent': 0, 'status': '',
+            'has_children': False, 'depth': insert_depth,
+            'title': ' -- {} -- '.format(insert_label or 'here'),
+        }
+        visible = list(visible)  # copy to avoid mutating cache
+        visible.insert(insert_pos, marker)
+        cursor_pos = insert_pos
 
     # Adjust scroll offset to keep cursor visible
-    if cursor < _scroll_offset:
-        _scroll_offset = cursor
-    if cursor >= _scroll_offset + height:
-        _scroll_offset = cursor - height + 1
+    if cursor_pos < _scroll_offset:
+        _scroll_offset = cursor_pos
+    if cursor_pos >= _scroll_offset + height:
+        _scroll_offset = cursor_pos - height + 1
     if _scroll_offset < 0:
         _scroll_offset = 0
 
@@ -96,7 +108,23 @@ def render_list(top, height, cols):
 
         ticket = visible[vis_idx]
         tid = ticket['id']
-        is_cursor_line = (vis_idx == cursor)
+        is_cursor_line = (vis_idx == cursor_pos)
+
+        # Insert mode marker — render distinctively and skip normal logic
+        if tid == -1:
+            rel_depth = ticket['depth'] - base_depth
+            if rel_depth < 0:
+                rel_depth = 0
+            line = '  ' + '  ' * rel_depth + '  # ' + ticket['title']
+            if len(line) > cols:
+                line = line[:cols]
+            set_style(fg=11, bg=4, bold=True)
+            write(line)
+            if len(line) < cols:
+                write(' ' * (cols - len(line)))
+            reset_style()
+            continue
+
         is_selected = (tid in selected)
         is_search_match = (
             search_query
@@ -412,7 +440,7 @@ def _render_sep(row, cols, label, info=False):
         write(S * min(7 - pos, cols - pos))
         pos = min(7, cols)
 
-    # -- position 8: search prompt + query
+    # -- position 8: search prompt + query, or key hints
     if search is not None and pos < cols:
         prompt = '/'
         set_style(fg=11, bg=4, bold=True)
@@ -422,6 +450,19 @@ def _render_sep(row, cols, label, info=False):
             reset_style()
             write(search[:cols - pos])
             pos += len(search)
+        set_style(fg=8)
+    elif info and pos < cols:
+        # Show context-sensitive key hints in subtle gray
+        if insert_mode:
+            hints = 'enter:ok  \u2190\u2192:indent  esc:cancel'
+        else:
+            hints = ' n:new  e:edit  m:move  o/c/s:open/close/status  /:search  alt-\u2191\u2193:scope '
+        avail = cols - pos - len(label_str) - 3  # room before label
+        if avail > 10:
+            h = hints[:avail]
+            set_style(fg=242)
+            write(h)
+            pos += len(h)
         set_style(fg=8)
 
     # -- separator fill to label
@@ -506,11 +547,10 @@ NAVIGATION
   g, Home          First item
   G, End           Last item
   PgUp, PgDn       Page up/down
-  Right            Expand node
-  Left             Collapse node
+  Right            Expand node / move to first child
+  Left             Collapse node / move to parent
   Alt-Right        Expand siblings recursively
   Alt-Left         Collapse siblings recursively
-  Enter            Toggle expand/collapse
   Alt-Down         Scope down into ticket
   Alt-Up           Scope up to parent
 
@@ -538,10 +578,18 @@ ACTIONS
   o                Reopen ticket
   e                Edit in editor
   E                Edit recursively
-  n                Create new ticket
-  m                Move selected tickets
+  n                Create (enter insert mode)
+  N                Create bulk/recursive
+  m                Move (enter insert mode)
   v                View in pager
   V                View recursively
+
+INSERT MODE (n/m)
+  j/k, Up/Down     Move insertion marker
+  Right            Make child of entry above
+  Left             Outdent
+  Enter            Confirm
+  Esc, q           Cancel
 
 OTHER
   ?                Help (toggle)

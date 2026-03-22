@@ -230,6 +230,27 @@ def read_key():
         if ch2 == '':
             return 'esc'
 
+        # ESC ESC ... — Alt prefix before another escape sequence
+        # Some terminals send Alt+Up as ESC ESC [ A instead of ESC [ 1;3 A
+        if ch2 == '\x1b':
+            if not _peek():
+                return 'esc'
+            ch3 = _read1()
+            if ch3 == '[':
+                inner = _read_csi(fd, _read1, _peek)
+                # Prepend alt- if not already modified
+                if inner.startswith(('shift-', 'ctrl-', 'alt-', 'ctrl-shift-')):
+                    return inner  # already has a modifier
+                return 'alt-' + inner
+            if ch3 == 'O':
+                ch4 = _read1()
+                ss3_map = {'P': 'f1', 'Q': 'f2', 'R': 'f3', 'S': 'f4'}
+                inner = ss3_map.get(ch4, 'esc')
+                if inner != 'esc':
+                    return 'alt-' + inner
+                return 'esc'
+            return 'esc'
+
         # CSI sequence: ESC [
         if ch2 == '[':
             return _read_csi(fd, _read1, _peek)

@@ -203,49 +203,60 @@ def action_edit(recursive=False):
     reload()
 
 
-def action_create():
-    """Create a new ticket with position prompt."""
-    global needs_redraw
-
-    _status_bar_message('Create: \u2191before \u2193after \u2190first child \u2192last child  (Esc cancel)')
-
-    key = read_key()
-    if key in ('esc', 'ctrl-c'):
-        needs_redraw = {'all'}
-        return
-    mode_map = {
-        'up': 'before', 'i': 'before', 'k': 'before',
-        'down': 'after', 'a': 'after', 'j': 'after',
-        'left': 'first', 'I': 'first',
-        'right': 'last', 'A': 'last',
-    }
-    mode = mode_map.get(key)
-    if mode is None:
-        needs_redraw = {'all'}
-        return
-
-    t = cursor_ticket()
-    if t is None:
-        needs_redraw = {'all'}
-        return
-    cursor_id = t['id']
-    if cursor_id == 0:
-        # Try to use first real ticket
-        vis = visible_tickets()
-        found = False
-        for vt in vis:
-            if vt['id'] != 0:
-                cursor_id = vt['id']
-                found = True
-                break
-        if not found:
-            needs_redraw = {'all'}
-            return
-
+def _do_create(relation, dest_id):
+    """Insert-mode callback: create a ticket at the resolved position."""
+    old_ids = {t['id'] for t in all_tickets}
     term_suspend()
-    plan_create(mode, cursor_id)
+    plan_create(relation, dest_id)
     term_resume()
     reload()
+    for t in all_tickets:
+        if t['id'] not in old_ids:
+            _ensure_visible_and_cursor(t['id'])
+            break
+
+
+def _do_create_recursive(relation, dest_id):
+    """Insert-mode callback: bulk create tickets at the resolved position."""
+    old_ids = {t['id'] for t in all_tickets}
+    term_suspend()
+    plan_create(relation, dest_id, recursive=True)
+    term_resume()
+    reload()
+    # Cursor to first new ticket
+    for t in all_tickets:
+        if t['id'] not in old_ids:
+            _ensure_visible_and_cursor(t['id'])
+            break
+
+
+def _enter_insert_for_create(callback, label):
+    """Common logic to enter insert mode for create/create-recursive."""
+    global insert_mode, insert_pos, insert_depth, insert_callback, insert_label, needs_redraw
+
+    vis = visible_tickets()
+    if not vis:
+        return
+    t = cursor_ticket()
+    if t is None:
+        return
+
+    insert_mode = True
+    insert_pos = cursor + 1
+    insert_depth = _auto_insert_depth(insert_pos, vis)
+    insert_label = label
+    insert_callback = callback
+    needs_redraw = {'all'}
+
+
+def action_create():
+    """Enter insert mode to pick where the new ticket goes."""
+    _enter_insert_for_create(_do_create, 'create')
+
+
+def action_create_recursive():
+    """Enter insert mode to pick where bulk-created tickets go."""
+    _enter_insert_for_create(_do_create_recursive, 'create -r')
 
 
 def action_view(recursive=False):
@@ -289,9 +300,25 @@ def action_view(recursive=False):
     term_resume()
 
 
+def _do_move(relation, dest_id):
+    """Insert-mode callback: move selected tickets to the resolved position."""
+    global selected
+    ids = [i for i in selected if i != 0 and i != dest_id]
+    if not ids:
+        return
+    first_id = ids[0]
+    err = plan_move(ids, relation, dest_id)
+    if err:
+        _show_error(err)
+        return
+    selected.clear()
+    reload()
+    _ensure_visible_and_cursor(first_id)
+
+
 def action_move():
-    """Move selected tickets relative to cursor."""
-    global selected, needs_redraw
+    """Enter insert mode to pick where to move selected tickets."""
+    global insert_mode, insert_pos, insert_depth, insert_callback, insert_label, needs_redraw
 
     if not selected:
         _status_bar_message('Select tickets to move first')
@@ -299,42 +326,19 @@ def action_move():
         needs_redraw = {'all'}
         return
 
+    vis = visible_tickets()
+    if not vis:
+        return
     t = cursor_ticket()
-    if t is None or t['id'] == 0:
-        _status_bar_message('Move cursor to a destination ticket')
-        read_key()
-        needs_redraw = {'all'}
-        return
-    dest_id = t['id']
-
-    _status_bar_message('Move: \u2191before \u2193after \u2190first child \u2192last child  (Esc cancel)')
-
-    key = read_key()
-    if key in ('esc', 'ctrl-c'):
-        needs_redraw = {'all'}
-        return
-    relation_map = {
-        'up': 'before', 'i': 'before',
-        'down': 'after', 'a': 'after',
-        'left': 'first', 'I': 'first',
-        'right': 'last', 'A': 'last',
-    }
-    relation = relation_map.get(key)
-    if relation is None:
-        needs_redraw = {'all'}
+    if t is None:
         return
 
-    ids = [i for i in selected if i != 0 and i != dest_id]
-    if not ids:
-        needs_redraw = {'all'}
-        return
-
-    err = plan_move(ids, relation, dest_id)
-    if err:
-        _show_error(err)
-        return
-    selected.clear()
-    reload()
+    insert_mode = True
+    insert_pos = cursor + 1
+    insert_depth = _auto_insert_depth(insert_pos, vis)
+    insert_label = 'move'
+    insert_callback = _do_move
+    needs_redraw = {'all'}
 
 
 def action_help():

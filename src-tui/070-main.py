@@ -29,6 +29,181 @@ def _search_jump_nearest():
         cursor = idx
 
 
+def _auto_insert_depth(pos, vis):
+    """Compute the natural depth for an insertion marker at gap position pos."""
+    if not vis:
+        return 0
+    if pos <= 0:
+        return vis[0]['depth'] if vis else 0
+    above = vis[pos - 1]
+    if pos < len(vis):
+        below = vis[pos]
+        if below['depth'] > above['depth']:
+            return below['depth']
+    return above['depth']
+
+
+def _resolve_insert(pos, depth, vis):
+    """Convert insert position + depth into (relation, dest_id) for plan command.
+
+    Returns (relation, dest_id) or (None, None) if invalid.
+    """
+    if not vis or pos <= 0:
+        return (None, None)
+
+    above = vis[pos - 1]
+
+    # Can't reference synthetic Project entry
+    if above['id'] == 0:
+        if pos < len(vis):
+            return ('before', vis[pos]['id'])
+        return (None, None)
+
+    if depth > above['depth']:
+        # Inserting as child of above
+        return ('first', above['id'])
+    elif depth == above['depth']:
+        # Inserting as sibling after above
+        return ('after', above['id'])
+    else:
+        # Walk up parent chain to find ancestor at the target depth
+        id_map = {t['id']: t for t in all_tickets}
+        cur = above
+        while cur['depth'] > depth:
+            parent = id_map.get(cur['parent'])
+            if parent is None:
+                break
+            cur = parent
+        return ('after', cur['id'])
+
+
+def _handle_insert_key(key):
+    """Handle a keypress while in insert mode."""
+    global insert_mode, insert_pos, insert_depth, insert_callback, needs_redraw, _visible_dirty
+
+    vis = visible_tickets()
+    max_pos = len(vis)  # valid positions: 1..max_pos
+    min_pos = 1  # skip Project/scope entry at position 0
+
+    if key in ('j', 'down'):
+        if insert_pos < max_pos:
+            insert_pos += 1
+            insert_depth = _auto_insert_depth(insert_pos, vis)
+            needs_redraw = needs_redraw | {'list'}
+
+    elif key in ('k', 'up'):
+        if insert_pos > min_pos:
+            insert_pos -= 1
+            insert_depth = _auto_insert_depth(insert_pos, vis)
+            needs_redraw = needs_redraw | {'list'}
+
+    elif key in ('g', 'home'):
+        insert_pos = min_pos
+        insert_depth = _auto_insert_depth(insert_pos, vis)
+        needs_redraw = needs_redraw | {'list'}
+
+    elif key in ('G', 'end'):
+        insert_pos = max_pos
+        insert_depth = _auto_insert_depth(insert_pos, vis)
+        needs_redraw = needs_redraw | {'list'}
+
+    elif key == 'right':
+        # Indent: make it a child of the entry above
+        # If above has children, expand it so they become visible
+        if insert_pos > 0 and insert_pos <= len(vis):
+            above = vis[insert_pos - 1]
+            if above['id'] != 0 and insert_depth <= above['depth']:
+                if above.get('has_children') and above['id'] not in expanded:
+                    expanded.add(above['id'])
+                    _visible_dirty = True
+                    # Refresh vis — children are now visible after above
+                    vis = visible_tickets()
+                    max_pos = len(vis)
+                    # Find where above is in the new list and position after it
+                    for idx in range(len(vis)):
+                        if vis[idx]['id'] == above['id']:
+                            insert_pos = idx + 1
+                            break
+                insert_depth = above['depth'] + 1
+                needs_redraw = {'all'}
+
+    elif key == 'left':
+        # First: if the entry right after the marker is at the same depth,
+        # has children, and is expanded — just collapse it (like nav mode)
+        if insert_pos < len(vis):
+            after = vis[insert_pos]
+            if (after['depth'] == insert_depth
+                    and after.get('has_children')
+                    and after['id'] in expanded):
+                expanded.discard(after['id'])
+                _visible_dirty = True
+                vis = visible_tickets()
+                needs_redraw = {'all'}
+                return
+
+        # Otherwise: outdent and move marker before the parent
+        # If already at the last-child position, stay there (after subtree)
+        base = 0
+        if scope is not None:
+            for t in all_tickets:
+                if t['id'] == scope:
+                    base = t['depth'] + 1
+                    break
+        if insert_depth > base:
+            new_depth = insert_depth - 1
+            # Find the parent entry at new_depth by walking up
+            parent_idx = None
+            for p in range(insert_pos - 1, -1, -1):
+                if vis[p]['depth'] == new_depth:
+                    parent_idx = p
+                    break
+                if vis[p]['depth'] < new_depth:
+                    break
+            if parent_idx is not None:
+                # Check: is the marker already after all children of this parent?
+                # i.e., is there no entry at insert_depth between marker and parent?
+                after_last_child = True
+                for s in range(insert_pos, len(vis)):
+                    if vis[s]['depth'] <= new_depth:
+                        break
+                    if vis[s]['depth'] == insert_depth:
+                        after_last_child = False
+                        break
+                if after_last_child:
+                    # Already after last child — find end of parent's subtree
+                    sub_end = parent_idx + 1
+                    for s in range(parent_idx + 1, len(vis)):
+                        if vis[s]['depth'] > new_depth:
+                            sub_end = s + 1
+                        else:
+                            break
+                    insert_pos = sub_end
+                else:
+                    # Go before the parent
+                    insert_pos = parent_idx
+            insert_depth = new_depth
+            needs_redraw = needs_redraw | {'list'}
+
+    elif key == 'enter':
+        # Confirm insertion
+        relation, dest_id = _resolve_insert(insert_pos, insert_depth, vis)
+        cb = insert_callback
+        insert_mode = False
+        insert_callback = None
+        needs_redraw = {'all'}
+        if relation and dest_id and cb:
+            cb(relation, dest_id)
+
+    elif key in ('esc', 'ctrl-c', 'q'):
+        # Cancel
+        insert_mode = False
+        insert_callback = None
+        needs_redraw = {'all'}
+
+    elif key == '_notify':
+        apply_preview_result()
+
+
 def _handle_search_key(key):
     """Handle a keypress while in search mode."""
     global search_query, search_mode, cursor, needs_redraw
@@ -133,20 +308,6 @@ def _handle_normal_key(key):
         cursor = min(max_idx, cursor + page_size)
         needs_redraw = needs_redraw | {'list'}
         update_preview()
-
-    elif key == 'enter':
-        t = cursor_ticket()
-        if t is not None and t.get('has_children'):
-            saved = _cursor_id()
-            tid = t['id']
-            if tid in expanded:
-                expanded.discard(tid)
-            else:
-                expanded.add(tid)
-            _visible_dirty = True
-            _cursor_to_id(saved)
-            needs_redraw = needs_redraw | {'list'}
-            update_preview()
 
     elif key == 'right':
         # Expand one node
@@ -356,6 +517,9 @@ def _handle_normal_key(key):
     elif key == 'n':
         action_create()
 
+    elif key == 'N':
+        action_create_recursive()
+
     elif key == 'm':
         action_move()
 
@@ -407,7 +571,9 @@ def main(initial_scope):
             g_resize_flag = False
             needs_redraw = {'all'}
 
-        if search_mode:
+        if insert_mode:
+            _handle_insert_key(key)
+        elif search_mode:
             _handle_search_key(key)
         else:
             result = _handle_normal_key(key)
@@ -423,10 +589,38 @@ def main(initial_scope):
             render_partial()
 
 
+_USAGE_TEXT = """\
+Usage: plan-tui [-f FILE] [TICKET_ID]
+
+  Browse and manage plan tickets in a terminal UI.
+
+Options:
+  -f, --file FILE    Use a specific plan file
+  TICKET_ID          Start with scope set to this ticket
+  -h, --help, help   Show this help
+
+"""
+
+def _show_help_and_exit():
+    """Print full help (usage + hotkeys) through a pager and exit."""
+    text = _USAGE_TEXT + _HELP_TEXT + '\n'
+    pager = os.environ.get('PAGER', '') or 'less'
+    try:
+        proc = subprocess.Popen([pager], stdin=subprocess.PIPE)
+        try:
+            proc.stdin.write(text.encode('utf-8', errors='replace'))
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        proc.wait()
+    except Exception:
+        sys.stdout.write(text)
+    sys.exit(0)
+
+
 if __name__ == '__main__':
     if not sys.stdin.isatty():
         sys.exit('plan-tui requires a terminal')
-    # Parse arguments: optional -f/--file and optional ticket ID for initial scope
     _initial_scope = None
     _args = sys.argv[1:]
     while _args:
@@ -435,9 +629,8 @@ if __name__ == '__main__':
                 sys.exit('-f/--file requires an argument')
             os.environ['PLAN_MD'] = _args[1]
             _args = _args[2:]
-        elif _args[0] in ('-h', '--help'):
-            print('Usage: plan-tui [-f FILE] [TICKET_ID]')
-            sys.exit(0)
+        elif _args[0] in ('-h', '--help', 'h', 'help'):
+            _show_help_and_exit()
         elif _args[0].isdigit():
             _initial_scope = int(_args[0])
             _args = _args[1:]
