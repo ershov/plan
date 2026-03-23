@@ -6,6 +6,7 @@ all_tickets = []      # flat list of ticket dicts from plan_list() (full tree, c
 cursor = 0            # integer index into the visible tickets list
 scope = None          # ticket ID (int) or None for root
 expanded = set()      # set of ticket IDs that have been expanded
+_expanded_by_scope = {}  # scope_key -> set of expanded IDs (saved per scope)
 selected = set()      # set of ticket IDs for multi-select
 search_query = ''     # string, empty when not in search mode
 search_mode = False   # bool, whether keystrokes go to search input

@@ -7120,18 +7120,20 @@ class TestInstallUninstall(unittest.TestCase):
     # --- --version flag ---
 
     def test_version_flag(self):
-        """--version prints VERSION_STR and exits."""
+        """--version prints VERSION_STR VERSION_DATE and exits."""
         buf = io.StringIO()
         with unittest.mock.patch('sys.stdout', buf):
             plan.main(["--version"])
-        self.assertEqual(buf.getvalue().strip(), plan.VERSION_STR)
+        self.assertEqual(buf.getvalue().strip(),
+                         f"{plan.VERSION_STR} {plan.VERSION_DATE}")
 
     def test_version_flag_anywhere(self):
         """--version anywhere in argv prints version and exits."""
         buf = io.StringIO()
         with unittest.mock.patch('sys.stdout', buf):
             plan.main(["install", "--version", "local"])
-        self.assertEqual(buf.getvalue().strip(), plan.VERSION_STR)
+        self.assertEqual(buf.getvalue().strip(),
+                         f"{plan.VERSION_STR} {plan.VERSION_DATE}")
 
     # --- Multi-version uninstall ---
 
@@ -7328,16 +7330,12 @@ class TestParseCreateTemplate(unittest.TestCase):
         result = plan._parse_create_template(text)
         self.assertEqual(result["body"], "Body line 1\nBody line 2")
 
-    def test_parse_parent(self):
+    def test_parse_parent_as_regular_attr(self):
+        """'parent' in template is treated as a regular attribute (no special handling)."""
         text = "## T\n    parent: 5\n    move: 1\n"
         result = plan._parse_create_template(text)
-        self.assertEqual(result["parent"], "5")
-        self.assertNotIn("parent", result["attrs"])
-
-    def test_parse_parent_blank(self):
-        text = "## T\n    parent: \n    move: 1\n"
-        result = plan._parse_create_template(text)
-        self.assertIsNone(result["parent"])
+        self.assertNotIn("parent", result)
+        self.assertEqual(result["attrs"]["parent"], "5")
 
     def test_empty_title_error(self):
         text = "## \n    move: 1\n"
@@ -7387,18 +7385,21 @@ class TestBuildCreateTemplate(unittest.TestCase):
         self.assertIn("    assignee:", text)
         self.assertIn("    links:", text)
 
-    def test_template_with_parent(self):
-        text = plan._build_create_template(move="1", parent="5")
-        self.assertIn("    parent: 5", text)
+    def test_template_no_parent_field(self):
+        """Template no longer has a parent field."""
+        text = plan._build_create_template(move="last 5")
+        self.assertNotIn("parent:", text)
+        self.assertIn("    move: last 5", text)
 
     def test_template_with_prefilled_title(self):
         text = plan._build_create_template(move="1", title="My task")
         self.assertIn("## My task", text)
 
-    def test_template_no_parent_by_default(self):
+    def test_template_move_first_attr(self):
         text = plan._build_create_template(move="1")
-        # parent line should be present but empty
-        self.assertIn("    parent:", text)
+        # move should be the first attribute line
+        lines = [l for l in text.split('\n') if l.strip().startswith('move:')]
+        self.assertEqual(len(lines), 1)
 
     def test_template_with_errors(self):
         text = plan._build_create_template(move="1", errors=["title is required"])
@@ -7407,12 +7408,11 @@ class TestBuildCreateTemplate(unittest.TestCase):
     def test_template_roundtrip(self):
         """Build template, parse it back — fields should survive."""
         text = plan._build_create_template(
-            move="2.5", parent="3", title="Roundtrip test"
+            move="last 3", title="Roundtrip test"
         )
         parsed = plan._parse_create_template(text)
         self.assertEqual(parsed["title"], "Roundtrip test")
-        self.assertEqual(parsed["parent"], "3")
-        self.assertEqual(parsed["attrs"]["move"], "2.5")
+        self.assertEqual(parsed["attrs"]["move"], "last 3")
 
     def test_blank_line_before_attrs(self):
         """Template has a blank line between title and attributes."""
@@ -8176,16 +8176,17 @@ class TestBulkSubstitution(unittest.TestCase):
         result = plan._substitute_bulk_text(text, {}, {0: 1})
         self.assertIn("{#1}", result)
 
-    def test_undefined_placeholder_error(self):
+    def test_undefined_placeholder_passthrough(self):
+        """Undefined placeholders pass through unchanged."""
         text = "    links: blocked:#newGhost\n"
-        with self.assertRaises(SystemExit):
-            plan._substitute_bulk_text(text, {}, {})
+        result = plan._substitute_bulk_text(text, {}, {})
+        self.assertIn("#newGhost", result)
 
-    def test_undefined_placeholder_without_new_prefix(self):
-        """Non-numeric identifiers without 'new' prefix are also caught."""
+    def test_undefined_placeholder_without_new_prefix_passthrough(self):
+        """Non-numeric identifiers without 'new' prefix pass through unchanged."""
         text = "    links: blocked:#ghost\n"
-        with self.assertRaises(SystemExit):
-            plan._substitute_bulk_text(text, {}, {})
+        result = plan._substitute_bulk_text(text, {}, {})
+        self.assertIn("#ghost", result)
 
     def test_substitute_placeholder_without_new_prefix(self):
         """Placeholders without 'new' prefix are substituted correctly."""
@@ -8440,7 +8441,8 @@ class TestParseBulkMarkdown(unittest.TestCase):
 
     def test_snapshot_restored_on_error(self):
         project = self._project(next_id=5)
-        text = "* ## Ticket: Task: OK\n    links: blocked:#newGhost\n"
+        # Duplicate placeholder triggers an error
+        text = "* ## Ticket: Task: A {#dup}\n* ## Ticket: Task: B {#dup}\n"
         with self.assertRaises(SystemExit):
             plan._parse_bulk_markdown(text, project, parent=None, mode="create")
         self.assertEqual(project.next_id, 5)  # restored

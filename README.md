@@ -6,6 +6,28 @@ No external dependencies — only Python 3 standard library.
 
 * [Comprehensive documentation](doc/README.md)
 
+## Concepts
+
+Small and medium-sized projects in git need a lightweight way to track bugs, features, and todo lists without leaving the repository. External issue trackers add friction; plain-text checklists lack structure.
+
+`plan` solves this with a single markdown file that is both **human-readable** and **agent-friendly**. The storage format is easy to understand and edit directly. The CLI provides a convenient interface on top of it.
+
+### Hierarchical tickets
+
+Tickets form a tree. The top level describes high-level objectives in broad terms. Each objective is broken into smaller tasks, and those tasks into individual chunks of work — small enough to complete in one sitting (or one agent context window).
+
+Each ticket carries only the description appropriate for its level — not too detailed, not too vague. Tickets must not contain TODO lists; instead, those items are organized as subtickets. If additional work is discovered during execution, new tickets are created and placed at the right level in the hierarchy.
+
+### Execution order
+
+The natural execution order is **depth-first, post-order** (topological order) — children before parents, left to right. For single-agent or single-person work, tickets are simply executed one at a time in this order. No additional metadata is needed.
+
+For parallel execution (multiple agents or team members), `plan` supports **blocking links** between tickets. For single-agent work, blocking links should not be used — topological order is sufficient.
+
+### Project documentation
+
+Project-wide information — goals, architecture notes, conventions — lives in the **project** section of the plan file, separate from tickets.
+
 ## Quick start
 
 ```bash
@@ -48,142 +70,19 @@ For user-wide installation (binary to `~/.local/bin/`, plugin + CLAUDE.md to `~/
 python3 plan.py install user
 ```
 
-## File discovery
-
-The plan file is located using this precedence:
-
-1. `--file` / `-f` flag
-2. `PLAN_MD` environment variable
-3. `.PLAN.md` at the git repository root
-
-## Usage
+## CLI overview
 
 ```
 plan [selectors] [verb] [args] [; ...]
-plan [verb] [args] [selectors] [; ...]
 ```
 
-## Examples
+Common operations: `create`, `list`, `get`, `status`, `close`, `move`, `edit`, `link`, `comment add`. Filter with `-q`, recurse with `-r`, format output with `--format`.
 
-```bash
-plan list                          # All tickets
-plan 5                             # Show ticket #5
-plan create -e                     # Create ticket (opens editor)
-plan create 5 -e                   # Create child of #5
-plan edit 5                        # Edit in $EDITOR
-plan 5 status in-progress          # Set status
-plan 5 close                       # Close ticket
-plan 5 comment add "Note"          # Add comment
-plan 5 -r list                     # Ticket #5 and descendants
-plan 5 move 3                      # Move #5 under #3
-```
+See the [CLI reference](doc/cli-reference.md) for the full list of verbs, selectors, flags, and DSL expressions. See [examples](doc/examples.md) for copy-paste recipes.
 
-### Verbs
+## Terminal UI
 
-Verbs describe *what to do* with a target. At most one verb per request. Default is `get`.
-
-| Verb | Description |
-|------|-------------|
-| `get` | Print content (default) |
-| `list` | List tickets (top-level by default) |
-| `replace --force` | Replace content (`text`, `-` for stdin, `@file`) |
-| `add` / `+` | Smart append (body, comment, list attr) |
-| `del` | Delete target |
-| `mod` / `~` | Modify via DSL expression |
-| `link [TYPE] ID` | Link to ticket (default: related) |
-| `unlink [TYPE\|all] ID` | Remove link (default: all) |
-| `status STATUS` | Set ticket status |
-| `close [RESOLUTION]` | Close ticket (default: done) |
-| `reopen` | Reopen ticket (set status to open) |
-| `move` | Reorder (`first`, `last`, `before\|after dest`) or reparent (`dest`, `first\|last dest`) |
-
-### Selectors
-
-Selectors narrow what verbs act on.
-
-| Selector | Description |
-|----------|-------------|
-| `N` | Select ticket by ID (bare integer) |
-| `id NAME` | Select any node by its `#id` (section, ticket, comment) |
-| `comment` | Narrow to ticket's comments |
-| `attr NAME` | Narrow to a specific attribute |
-| `project [section]` | Select project-level section |
-
-### Commands
-
-Commands are standalone operations that don't use the selector/verb system.
-
-| Command | Description |
-|---------|-------------|
-| `create [parent] EXPR` | Create a new ticket |
-| `edit ID [-r]` | Edit ticket in `$EDITOR` (`-r` includes children) |
-| `check` | Validate document |
-| `fix` | Auto-repair document |
-| `resolve` | Resolve git merge conflicts |
-| `install local\|user` | Install binary, Claude Code plugin, CLAUDE.md |
-| `uninstall local\|user` | Remove binary, plugin, CLAUDE.md section |
-| `help` | Show help |
-
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `-f`, `--file FILE` | Specify plan file |
-| `-r` | Recursive (include all descendants) |
-| `-p` | Include ancestor path; with `-r` + filter, keeps tree structure |
-| `-n N` | Limit output lines |
-| `-q EXPR` | Filter by Python expression (usually implicit) |
-| `--format EXPR` | Format output with Python expression |
-| `--title TEXT` | Filter by title |
-| `--text TEXT` | Filter by title and body |
-| `--attr VALUE` | Filter by attribute value |
-| `--self` | Include the target ticket in listings |
-| `--force` | Required for `replace` |
-
-## DSL expressions
-
-Filter (`-q`), format (`--format`), and modification (`mod`/`~`) expressions are plain Python evaluated in a sandboxed namespace. Each ticket's attributes are available as variables. Missing attributes resolve to `""`.
-
-Available builtins: `len`, `any`, `all`, `min`, `max`, `sorted`, `int`, `str`, `float`, `True`, `False`, `None`.
-
-Modification functions: `set()`, `add()`, `delete()`, `link()`, `unlink()`.
-
-See `AGENTS/DSL.md` for full specification.
-
-## Document structure
-
-The plan file is a structured markdown document:
-
-```markdown
-# Project Name {#project}
-
-## Metadata {#metadata}
-
-    next_id: 3
-
-## Description {#description}
-
-Project description here.
-
-## Tickets {#tickets}
-
-* ## Ticket: Task: Title {#1}
-
-      created: 2024-01-01 00:00:00 UTC
-      status: open
-
-  Ticket body text.
-
-  * ## Comments {#1:comments}
-
-    * First comment {#1:comment:1}
-
-  * ## Ticket: Task: Subtask {#2}
-
-        status: open
-```
-
-All IDs are global and unique. Tickets are hierarchical (nested via indentation). Attributes follow the `{#id}` header line, indented by 4 additional spaces. Links between tickets are automatically interlinked (e.g., adding `blocked:#3` to #5 also adds `blocking:#5` to #3).
+`plan-tui` provides an interactive terminal interface for browsing and managing tickets. Navigate the ticket tree, search, and update statuses without leaving the terminal.
 
 ## Claude Code plugin
 

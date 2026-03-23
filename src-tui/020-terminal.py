@@ -38,11 +38,13 @@ def scroll_down():
     """Scroll the contents of the scroll region down by one line."""
     write('\033M')
 
-def set_style(fg=None, bg=None, bold=False, reverse=False):
+def set_style(fg=None, bg=None, bold=False, reverse=False, underline=False):
     """Apply 256-color style. fg/bg are ints 0-255 or None."""
     parts = ['0']  # reset first
     if bold:
         parts.append('1')
+    if underline:
+        parts.append('4')
     if reverse:
         parts.append('7')
     if fg is not None:
@@ -92,8 +94,8 @@ def _enter_raw():
     if _saved_termios is None:
         _saved_termios = termios.tcgetattr(sys.stdin.fileno())
     tty.setraw(sys.stdin.fileno())
-    # Alternate screen buffer, hide cursor
-    sys.stdout.buffer.write(b'\033[?1049h\033[?25l')
+    # Alternate screen buffer, hide cursor, enable SGR mouse tracking
+    sys.stdout.buffer.write(b'\033[?1049h\033[?25l\033[?1000h\033[?1006h')
     sys.stdout.buffer.flush()
 
 def notify_wake():
@@ -122,8 +124,8 @@ def term_init():
 def term_restore():
     """Restore termios, leave alternate screen, show cursor."""
     global _saved_termios, _notify_r, _notify_w
-    # Show cursor, leave alternate screen
-    sys.stdout.buffer.write(b'\033[?25h\033[?1049l')
+    # Disable mouse tracking, show cursor, leave alternate screen
+    sys.stdout.buffer.write(b'\033[?1006l\033[?1000l\033[?25h\033[?1049l')
     sys.stdout.buffer.flush()
     if _saved_termios is not None:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, _saved_termios)
@@ -320,17 +322,33 @@ def _read_csi(fd, _read1, _peek):
     if buf == 'F':
         return 'end'
 
-    # Tilde sequences: ESC [ <number> ~
+    # Tilde sequences: ESC [ <number> ~ or ESC [ <number> ; <mod> ~
     if buf.endswith('~'):
-        num = buf[:-1]
+        raw = buf[:-1]
+        mod_prefix = ''
+        if ';' in raw:
+            parts = raw.split(';')
+            num = parts[0]
+            try:
+                mod = int(parts[1])
+            except ValueError:
+                mod = 0
+            if mod == 2:
+                mod_prefix = 'shift-'
+            elif mod == 3:
+                mod_prefix = 'alt-'
+            elif mod == 5:
+                mod_prefix = 'ctrl-'
+        else:
+            num = raw
         if num == '1' or num == '7':
-            return 'home'
+            return mod_prefix + 'home'
         if num == '4' or num == '8':
-            return 'end'
+            return mod_prefix + 'end'
         if num == '5':
-            return 'pgup'
+            return mod_prefix + 'pgup'
         if num == '6':
-            return 'pgdn'
+            return mod_prefix + 'pgdn'
         if num == '2':
             return 'insert'
         if num == '3':
@@ -379,6 +397,23 @@ def _read_csi(fd, _read1, _peek):
             if mod == 6:
                 return 'ctrl-shift-' + direction
         return direction
+
+    # SGR mouse: ESC [ < Cb ; Cx ; Cy M/m
+    if buf.startswith('<') and buf[-1] in ('M', 'm'):
+        parts = buf[1:-1].split(';')
+        if len(parts) == 3:
+            try:
+                cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:
+                return '_mouse'
+            if cb == 64:
+                return 'scroll-up:{}:{}'.format(cy, cx)
+            if cb == 65:
+                return 'scroll-down:{}:{}'.format(cy, cx)
+            if cb == 0 and buf[-1] == 'M':  # left press only
+                return 'mouse-click:{}:{}'.format(cy, cx)
+            return '_mouse'  # ignore release, right-click, etc.
+        return '_mouse'
 
     # CSI u encoding (kitty keyboard protocol): ESC [ <keycode> ; <mod> u
     if buf.endswith('u') and ';' in buf:

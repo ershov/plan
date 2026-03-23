@@ -718,13 +718,12 @@ def _open_editor(initial_content, suffix='.md'):
     return text
 
 
-def _build_create_template(move="", parent="", title="", errors=None,
+def _build_create_template(move="", title="", errors=None,
                             body="", extra_attrs=None, bulk=False):
     """Build the editor template for create command.
 
     Args:
-        rank: pre-computed rank value
-        parent: parent ticket ID or empty string
+        move: pre-filled move expression or empty
         title: pre-filled title or empty
         errors: list of error strings to show as comments
         body: pre-filled body text
@@ -745,11 +744,10 @@ def _build_create_template(move="", parent="", title="", errors=None,
         lines.append("")
         attr_prefix = "    "
         body_prefix = ""
-    lines.append(f"{attr_prefix}parent: {parent}")
     lines.append(f"{attr_prefix}move: {move}")
     if extra_attrs:
         for key, val in extra_attrs.items():
-            if key not in ("parent", "move", "assignee", "links"):
+            if key not in ("move", "assignee", "links"):
                 lines.append(f"{attr_prefix}{key}: {val}")
     lines.append(f"{attr_prefix}assignee: {(extra_attrs or {}).get('assignee', '')}")
     lines.append(f"{attr_prefix}links: {(extra_attrs or {}).get('links', '')}")
@@ -764,14 +762,14 @@ def _build_create_template(move="", parent="", title="", errors=None,
 def _parse_create_template(text):
     """Parse editor template into ticket fields.
 
-    Returns dict with keys: title, attrs, body, parent, errors.
+    Returns dict with keys: title, attrs, body, errors.
     Returns None if text is empty.
     """
     if not text or not text.strip():
         return None
 
     lines = text.split('\n')
-    result = {"title": "", "attrs": {}, "body": "", "parent": None, "errors": []}
+    result = {"title": "", "attrs": {}, "body": "", "errors": []}
 
     # First non-empty line is the title
     line_idx = 0
@@ -809,9 +807,7 @@ def _parse_create_template(text):
             key, _, value = line.strip().partition(":")
             key = key.strip()
             value = value.strip()
-            if key == "parent":
-                result["parent"] = value if value else None
-            elif value:  # drop blank optional attrs
+            if value:  # drop blank optional attrs
                 result["attrs"][key] = value
             line_idx += 1
         elif not line.strip():
@@ -1458,9 +1454,7 @@ def _handle_create_bulk(project, text, parent_id, req, output):
 
 def _create_from_template(project, parsed_tmpl, parent_id, req, output):
     """Create a ticket from a parsed template dict. Shared by editor and stdin paths."""
-    # Resolve parent from template (may differ from CLI arg)
-    tmpl_parent = parsed_tmpl["parent"]
-    parent, siblings = _resolve_parent(project, tmpl_parent or parent_id)
+    parent, siblings = _resolve_parent(project, parent_id)
 
     # Create ticket from parsed template
     new_id = project.allocate_id()
@@ -1524,7 +1518,7 @@ def _handle_create(project, cmd_args, req, output):
         # Determine parent and siblings for rank pre-fill
         parent, siblings = _resolve_parent(project, parent_id)
 
-        default_move = ""
+        default_move = f"last {parent_id}" if parent_id else ""
 
         # Pre-fill from expression if provided
         prefill_title = ""
@@ -1543,7 +1537,6 @@ def _handle_create(project, cmd_args, req, output):
         use_bulk = bool(req.flags.get("recursive"))
         template = _build_create_template(
             move=prefill_attrs.pop("move", default_move),
-            parent=parent_id or "",
             title=prefill_title,
             body=prefill_body,
             extra_attrs=prefill_attrs,
@@ -1575,7 +1568,6 @@ def _handle_create(project, cmd_args, req, output):
                 # Rebuild template with errors and user's content preserved
                 template = _build_create_template(
                     move=parsed_tmpl["attrs"].get("move", default_move),
-                    parent=parsed_tmpl["parent"] or "",
                     title=parsed_tmpl["title"],
                     body=parsed_tmpl["body"],
                     extra_attrs={k: v for k, v in parsed_tmpl["attrs"].items()

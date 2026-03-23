@@ -444,13 +444,12 @@ run_plan_fail "err-numeric-id: create" \
     create - <<< '* ## Ticket: Task: Bad {#42}'
 
 # ==========================================================================
-# Scenario 8: Error — undefined placeholder reference
+# Scenario 8: Undefined placeholder passes through unchanged
 # ==========================================================================
 
 rm -f "$PLAN_FILE"
 
-run_plan_fail "err-undef-placeholder: create" \
-    "Undefined placeholder references" \
+run_plan "undef-placeholder-passthrough: create" \
     create - << 'EOF'
 * ## Ticket: Task: Ref test
 

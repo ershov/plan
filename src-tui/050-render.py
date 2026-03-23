@@ -16,16 +16,17 @@ def layout_panes():
     list_top = 1
 
     if not show_preview:
-        # Preview hidden — list gets all available space, no sub/preview panes
-        list_height = available
+        # Preview hidden — list gets all space except one row for the info bar
+        list_height = max(1, available - 1)
+        info_row = list_top + list_height
         return {
             'list_top': list_top,
             'list_height': list_height,
-            'sub_top': list_top + list_height,
+            'sub_top': info_row,
             'sub_height': 0,
-            'prev_top': list_top + list_height,
-            'prev_height': 0,
-            'info_row': 0,
+            'prev_top': info_row,
+            'prev_height': 1,  # just the separator
+            'info_row': info_row,
             'cols': cols,
         }
 
@@ -61,6 +62,84 @@ def layout_panes():
         'info_row': info_row,
         'cols': cols,
     }
+
+
+def _write_highlighted(line, base_fg=None, base_bold=False, reverse=False, pad_to=0):
+    """Write line with search fragment occurrences highlighted.
+
+    Highlights all occurrences of each search fragment in yellow (or
+    reverse+underline on cursor line).  Non-matching portions use the
+    base style.
+    """
+    if not search_query:
+        # No search — write with base style, optionally pad
+        if base_fg is not None or base_bold or reverse:
+            set_style(fg=base_fg, bold=base_bold, reverse=reverse)
+        write(line)
+        if pad_to > len(line):
+            write(' ' * (pad_to - len(line)))
+        if base_fg is not None or base_bold or reverse:
+            reset_style()
+        return
+
+    frags = search_query.lower().split()
+    if not frags:
+        if base_fg is not None or base_bold or reverse:
+            set_style(fg=base_fg, bold=base_bold, reverse=reverse)
+        write(line)
+        if pad_to > len(line):
+            write(' ' * (pad_to - len(line)))
+        if base_fg is not None or base_bold or reverse:
+            reset_style()
+        return
+
+    # Build a boolean mask of which character positions are highlighted
+    low = line.lower()
+    mask = [False] * len(line)
+    for frag in frags:
+        flen = len(frag)
+        start = 0
+        while True:
+            pos = low.find(frag, start)
+            if pos < 0:
+                break
+            for i in range(pos, pos + flen):
+                mask[i] = True
+            start = pos + 1
+
+    # Write spans switching between base and highlight styles
+    i = 0
+    while i < len(line):
+        if mask[i]:
+            # Find extent of highlighted span
+            j = i
+            while j < len(line) and mask[j]:
+                j += 1
+            if reverse:
+                set_style(reverse=True, underline=True)
+            else:
+                set_style(fg=3, bold=True)
+            write(line[i:j])
+            reset_style()
+            i = j
+        else:
+            # Find extent of non-highlighted span
+            j = i
+            while j < len(line) and not mask[j]:
+                j += 1
+            if base_fg is not None or base_bold or reverse:
+                set_style(fg=base_fg, bold=base_bold, reverse=reverse)
+            write(line[i:j])
+            if base_fg is not None or base_bold or reverse:
+                reset_style()
+            i = j
+
+    if pad_to > len(line):
+        if reverse:
+            set_style(reverse=True)
+        write(' ' * (pad_to - len(line)))
+        if reverse:
+            reset_style()
 
 
 def render_list(top, height, cols):
@@ -126,10 +205,7 @@ def render_list(top, height, cols):
             continue
 
         is_selected = (tid in selected)
-        is_search_match = (
-            search_query
-            and search_query.lower() in ticket['title'].lower()
-        )
+        is_search_match = _search_matches(_search_text(ticket))
 
         # Build the line content
         # Selection prefix
@@ -173,46 +249,27 @@ def render_list(top, height, cols):
 
         # Apply styling
         if is_cursor_line:
-            set_style(reverse=True)
-            write(line)
-            # Pad to fill width for reverse video
-            if len(line) < cols:
-                write(' ' * (cols - len(line)))
-            reset_style()
-        elif is_selected and is_search_match:
-            # Selected + search match: bold cyan with yellow for match
-            set_style(fg=6, bold=True)
-            write(line)
-            reset_style()
+            _write_highlighted(line, reverse=True, pad_to=cols)
         elif is_selected:
-            set_style(fg=6, bold=True)
-            write(line)
-            reset_style()
+            _write_highlighted(line, base_fg=6, base_bold=True)
         elif is_search_match:
-            set_style(fg=3)
-            write(line)
-            reset_style()
+            _write_highlighted(line)
         else:
             # Normal line — render marker in blue if present
             if tid != 0 and ticket['has_children']:
-                # Write prefix + indent, then marker in blue, then rest
                 marker_text = '\u25bc ' if tid in expanded else '\u25b6 '
                 pre = prefix + ('  ' * (ticket['depth'] - base_depth if ticket['depth'] - base_depth > 0 else 0))
                 rest = '#{} [{}] {}'.format(tid, ticket['status'], ticket['title'])
                 full = pre + marker_text + rest
                 if len(full) > cols:
                     full = full[:cols]
-                # Write prefix/indent part
                 write(pre)
-                # Write marker in blue
                 pre_len = len(pre)
                 marker_end = pre_len + len(marker_text)
                 if pre_len < cols:
                     set_style(fg=4)
-                    marker_portion = full[pre_len:min(marker_end, cols)]
-                    write(marker_portion)
+                    write(full[pre_len:min(marker_end, cols)])
                     reset_style()
-                # Write rest
                 if marker_end < cols:
                     write(full[marker_end:])
             else:
@@ -367,12 +424,29 @@ def render_subtickets(top, height, cols, info=False):
 
 
 def _preview_lines():
-    """Return the lines currently shown in the preview pane."""
+    """Return the lines currently shown in the preview pane, wrapped to terminal width."""
     if error_text:
-        return error_text.split('\n')
-    if help_mode:
-        return _HELP_TEXT.split('\n')
-    return preview_text.split('\n') if preview_text else []
+        raw = error_text.split('\n')
+    elif help_mode:
+        raw = _HELP_TEXT.split('\n')
+    elif preview_text:
+        raw = preview_text.split('\n')
+    else:
+        return []
+    cols = term_size()[0]
+    if cols <= 0:
+        return raw
+    wrapped = []
+    for line in raw:
+        line = line.replace('\t', '    ')
+        if not line:
+            wrapped.append('')
+        else:
+            while len(line) > cols:
+                wrapped.append(line[:cols])
+                line = line[cols:]
+            wrapped.append(line)
+    return wrapped
 
 
 def render_preview(top, height, cols, info=False):
@@ -391,12 +465,7 @@ def render_preview(top, height, cols, info=False):
         clear_line()
         src_idx = i + _preview_scroll
         if src_idx < len(lines):
-            line = lines[src_idx]
-            # Replace tabs with spaces for display
-            line = line.replace('\t', '    ')
-            if len(line) > cols:
-                line = line[:cols]
-            write(line)
+            write(lines[src_idx])
 
 
 _SB_BG = 236   # dark gray background for action prompts
@@ -555,8 +624,8 @@ NAVIGATION
   Alt-Up           Scope up to parent
 
 PREVIEW
-  Space            Scroll preview page down
-  b                Scroll preview page up
+  Alt-PgDn         Scroll preview page down
+  Alt-PgUp         Scroll preview page up
   Shift-Down       Scroll preview line down
   Shift-Up         Scroll preview line up
   Ctrl-P           Toggle preview pane
@@ -568,7 +637,8 @@ SEARCH
   Esc, Ctrl-C      Exit search mode
 
 SELECTION
-  Tab              Toggle select
+  Space            Toggle select, move down
+  Alt-Space        Toggle select, move up
   Ctrl-A           Select all visible
   Ctrl-N           Deselect all
 
@@ -590,6 +660,10 @@ INSERT MODE (n/m)
   Left             Outdent
   Enter            Confirm
   Esc, q           Cancel
+
+MOUSE
+  Click            Select list item
+  Scroll wheel     Scroll area under mouse (list or preview)
 
 OTHER
   ?                Help (toggle)

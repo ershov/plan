@@ -61,7 +61,14 @@ DSL expressions:
   Composition:
     Chain with commas: set(status="done"), add(text="note")
 
-  Examples:
+  Filter examples:
+    plan 'not parent' list              List top-level tickets only
+    plan 'depth == 0' list              Same as above
+    plan 'assignee == "alice"' list     Tickets assigned to alice
+    plan 'is_descendant_of(5)' list     All descendants of #5
+    plan '"auth" in title' list         Tickets with "auth" in title
+
+  Mutator examples:
     plan 5 ~ 'set(status="in-progress", assignee="alice")'
     plan 5 ~ 'set(move="first")'
     plan 5 ~ 'set(move="first 3")'     Move under #3 as first child

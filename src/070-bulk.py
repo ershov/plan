@@ -103,15 +103,6 @@ def _substitute_bulk_text(text, placeholder_map, id_for_missing):
         result = re.sub(re.escape(placeholder) + r'(?![a-zA-Z0-9_-])',
                         real_id, result)
 
-    # Step 3: Check for any remaining undefined placeholders (non-numeric #id)
-    remaining = [m for m in re.findall(r"#([a-zA-Z0-9_-]+)", result)
-                 if not m.isdigit()]
-    if remaining:
-        unique = sorted(set(f"#{r}" for r in remaining))
-        raise SystemExit(
-            f"Undefined placeholder references: {', '.join(unique)}"
-        )
-
     return result
 
 

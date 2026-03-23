@@ -3,6 +3,25 @@
 ##############################################################################
 
 
+def _search_text(ticket):
+    """Return the searchable text for a ticket (matches visible list format)."""
+    tid = ticket['id']
+    if tid == 0:
+        return 'Project'
+    return '#{} [{}] {}'.format(tid, ticket['status'], ticket['title'])
+
+
+def _search_matches(text):
+    """Check if all space-separated search fragments match text (case-insensitive)."""
+    if not search_query:
+        return False
+    frags = search_query.lower().split()
+    if not frags:
+        return False
+    low = text.lower()
+    return all(f in low for f in frags)
+
+
 def _search_next(start, direction=1):
     """Find the next matching ticket index from start in the given direction.
 
@@ -12,11 +31,10 @@ def _search_next(start, direction=1):
     vis = visible_tickets()
     if not vis or not search_query:
         return None
-    q = search_query.lower()
     n = len(vis)
     for step in range(1, n + 1):
         idx = (start + step * direction) % n
-        if q in vis[idx].get('title', '').lower():
+        if _search_matches(_search_text(vis[idx])):
             return idx
     return None
 
@@ -104,6 +122,20 @@ def _handle_insert_key(key):
 
     elif key in ('G', 'end'):
         insert_pos = max_pos
+        insert_depth = _auto_insert_depth(insert_pos, vis)
+        needs_redraw = needs_redraw | {'list'}
+
+    elif key == 'pgdn':
+        layout = layout_panes()
+        page_size = layout['list_height']
+        insert_pos = min(max_pos, insert_pos + page_size)
+        insert_depth = _auto_insert_depth(insert_pos, vis)
+        needs_redraw = needs_redraw | {'list'}
+
+    elif key == 'pgup':
+        layout = layout_panes()
+        page_size = layout['list_height']
+        insert_pos = max(min_pos, insert_pos - page_size)
         insert_depth = _auto_insert_depth(insert_pos, vis)
         needs_redraw = needs_redraw | {'list'}
 
@@ -203,6 +235,19 @@ def _handle_insert_key(key):
     elif key == '_notify':
         apply_preview_result()
 
+    else:
+        # Pass unhandled keys (Alt-arrows, Ctrl-P, Shift-arrows, etc.) to normal handler
+        result = _handle_normal_key(key)
+        # Visible list may have changed (e.g. collapse) — clamp insert_pos
+        vis = visible_tickets()
+        if insert_pos > len(vis):
+            insert_pos = max(1, len(vis))
+            insert_depth = _auto_insert_depth(insert_pos, vis)
+            needs_redraw = needs_redraw | {'list'}
+        return result
+
+    return None
+
 
 def _handle_search_key(key):
     """Handle a keypress while in search mode."""
@@ -239,32 +284,45 @@ def _handle_search_key(key):
             search_mode = False
             needs_redraw = needs_redraw | {'list', 'info'}
 
-    elif len(key) == 1 and key.isprintable():
-        search_query += key
+    elif key == 'space' or (len(key) == 1 and key.isprintable()):
+        search_query += ' ' if key == 'space' else key
         _search_jump_nearest()
         needs_redraw = needs_redraw | {'list', 'info'}
         update_preview()
+
+    else:
+        # Pass non-printable keys (arrows, ctrl-*, alt-*, etc.) to normal handler
+        return _handle_normal_key(key)
+
+    return None
 
 
 def _handle_normal_key(key):
     """Handle a keypress in normal mode."""
     global cursor, scope, expanded, selected, search_mode, search_query
     global needs_redraw, _visible_dirty, show_preview, _preview_scroll, help_mode, error_text
+    global _scroll_offset
 
     # Async preview load completed — consume result on main thread
     if key == '_notify':
         apply_preview_result()
         return None
 
-    # Error mode: scrollable, any non-scroll key dismisses
-    if error_text and key not in ('shift-up', 'shift-down', 'space', 'b'):
+    # Silently ignore unhandled mouse events (button release, right-click, etc.)
+    if key == '_mouse':
+        return None
+
+    _is_scroll = key.startswith('scroll-')
+
+    # Error mode: scrollable, any non-scroll/mouse key dismisses
+    if error_text and key not in ('shift-up', 'shift-down', 'alt-pgup', 'alt-pgdn') and not _is_scroll:
         error_text = ''
         _preview_scroll = 0
         needs_redraw = needs_redraw | {'preview'}
         return None
 
     # In help mode, shift-up/down scroll help; ? toggles off; anything else exits
-    if help_mode and key not in ('shift-up', 'shift-down', 'space', 'b', '?', 'f1', 'ctrl-p'):
+    if help_mode and key not in ('shift-up', 'shift-down', 'alt-pgup', 'alt-pgdn', '?', 'f1', 'ctrl-p') and not _is_scroll:
         help_mode = False
         _preview_scroll = 0
         needs_redraw = needs_redraw | {'preview'}
@@ -396,9 +454,13 @@ def _handle_normal_key(key):
         # Scope down into ticket
         t = cursor_ticket()
         if t is not None and t['id'] > 0:
+            # Save expanded state for current scope
+            scope_key = scope  # None for root
+            _expanded_by_scope[scope_key] = set(expanded)
             scope = t['id']
             cursor = 0
             expanded.clear()
+            expanded.update(_expanded_by_scope.get(scope, ()))
             _visible_dirty = True
             reload()
 
@@ -406,6 +468,8 @@ def _handle_normal_key(key):
         # Scope up to parent — cursor stays on the ticket we're leaving
         if scope is not None:
             old_scope = scope
+            # Save expanded state for current scope
+            _expanded_by_scope[scope] = set(expanded)
             parent_id = None
             for t in all_tickets:
                 if t['id'] == scope:
@@ -417,6 +481,7 @@ def _handle_normal_key(key):
                 scope = parent_id
             cursor = 0
             expanded.clear()
+            expanded.update(_expanded_by_scope.get(scope, ()))
             _visible_dirty = True
             reload()
             _cursor_to_id(old_scope)
@@ -443,27 +508,7 @@ def _handle_normal_key(key):
             needs_redraw = needs_redraw | {'preview'}
 
     elif key == 'space':
-        # Scroll preview one page down
-        lines = _preview_lines()
-        layout = layout_panes()
-        content_lines = max(1, layout['prev_height'] - 1)
-        max_scroll = max(0, len(lines) - content_lines)
-        _preview_scroll = min(max_scroll, _preview_scroll + content_lines)
-        needs_redraw = needs_redraw | {'preview'}
-
-    elif key == 'b':
-        # Scroll preview one page up
-        layout = layout_panes()
-        content_lines = max(1, layout['prev_height'] - 1)
-        _preview_scroll = max(0, _preview_scroll - content_lines)
-        needs_redraw = needs_redraw | {'preview'}
-
-    elif key == '/':
-        search_mode = True
-        search_query = ''
-        needs_redraw = needs_redraw | {'info'}
-
-    elif key == 'tab':
+        # Toggle select and move cursor down
         t = cursor_ticket()
         if t is not None and t['id'] != 0:
             tid = t['id']
@@ -476,7 +521,90 @@ def _handle_normal_key(key):
                 cursor += 1
             needs_redraw = needs_redraw | {'list', 'info'}
 
-    elif key == 'btab':
+    elif key == 'alt-pgdn':
+        # Scroll preview one page down
+        lines = _preview_lines()
+        layout = layout_panes()
+        content_lines = max(1, layout['prev_height'] - 1)
+        max_scroll = max(0, len(lines) - content_lines)
+        _preview_scroll = min(max_scroll, _preview_scroll + content_lines)
+        needs_redraw = needs_redraw | {'preview'}
+
+    elif key == 'alt-pgup':
+        # Scroll preview one page up
+        layout = layout_panes()
+        content_lines = max(1, layout['prev_height'] - 1)
+        _preview_scroll = max(0, _preview_scroll - content_lines)
+        needs_redraw = needs_redraw | {'preview'}
+
+    elif key.startswith('mouse-click:'):
+        # Click on list item to select it
+        parts = key.split(':')
+        row = int(parts[1])
+        layout = layout_panes()
+        lt, lh = layout['list_top'], layout['list_height']
+        if lt <= row < lt + lh:
+            vis_idx = _scroll_offset + (row - lt)
+            vis = visible_tickets()
+            if 0 <= vis_idx < len(vis):
+                cursor = vis_idx
+                needs_redraw = needs_redraw | {'list'}
+                update_preview()
+
+    elif key.startswith('scroll-up:'):
+        parts = key.split(':')
+        row = int(parts[1])
+        layout = layout_panes()
+        if row > layout['prev_top']:
+            # Over preview: scroll preview up
+            if _preview_scroll > 0:
+                _preview_scroll = max(0, _preview_scroll - 3)
+                needs_redraw = needs_redraw | {'preview'}
+        else:
+            # Over list (or subtickets): scroll viewport up
+            if _scroll_offset > 0:
+                _scroll_offset = max(0, _scroll_offset - 3)
+                # Clamp cursor into visible range
+                old_cursor = cursor
+                if cursor >= _scroll_offset + layout['list_height']:
+                    cursor = _scroll_offset + layout['list_height'] - 1
+                needs_redraw = needs_redraw | {'list'}
+                if cursor != old_cursor:
+                    update_preview()
+
+    elif key.startswith('scroll-down:'):
+        parts = key.split(':')
+        row = int(parts[1])
+        layout = layout_panes()
+        if row > layout['prev_top']:
+            # Over preview: scroll preview down
+            lines = _preview_lines()
+            content_lines = max(0, layout['prev_height'] - 1)
+            max_scroll = max(0, len(lines) - content_lines)
+            if _preview_scroll < max_scroll:
+                _preview_scroll = min(max_scroll, _preview_scroll + 3)
+                needs_redraw = needs_redraw | {'preview'}
+        else:
+            # Over list (or subtickets): scroll viewport down
+            vis = visible_tickets()
+            max_offset = max(0, len(vis) - layout['list_height'])
+            if _scroll_offset < max_offset:
+                _scroll_offset = min(max_offset, _scroll_offset + 3)
+                # Clamp cursor into visible range
+                old_cursor = cursor
+                if cursor < _scroll_offset:
+                    cursor = _scroll_offset
+                needs_redraw = needs_redraw | {'list'}
+                if cursor != old_cursor:
+                    update_preview()
+
+    elif key == '/':
+        search_mode = True
+        search_query = ''
+        needs_redraw = needs_redraw | {'info'}
+
+    elif key == 'alt- ':
+        # Toggle select and move cursor up
         t = cursor_ticket()
         if t is not None and t['id'] != 0:
             tid = t['id']
@@ -572,9 +700,13 @@ def main(initial_scope):
             needs_redraw = {'all'}
 
         if insert_mode:
-            _handle_insert_key(key)
+            result = _handle_insert_key(key)
+            if result == 'quit':
+                return
         elif search_mode:
-            _handle_search_key(key)
+            result = _handle_search_key(key)
+            if result == 'quit':
+                return
         else:
             result = _handle_normal_key(key)
             if result == 'quit':
