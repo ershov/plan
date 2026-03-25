@@ -102,7 +102,7 @@ def _handle_sigwinch(signum, frame):
 
 def _handle_sigtstp(signum, frame):
     """Restore terminal, then re-raise SIGTSTP with the default handler."""
-    term_restore()
+    _leave_raw()
     # Temporarily set default handler so re-raise actually stops the process
     signal.signal(signal.SIGTSTP, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGTSTP)
@@ -151,15 +151,18 @@ def term_init():
     signal.signal(signal.SIGTSTP, _handle_sigtstp)
     signal.signal(signal.SIGCONT, _handle_sigcont)
 
-def term_restore():
-    """Restore termios, leave alternate screen, show cursor."""
-    global _saved_termios, _notify_r, _notify_w
+def _leave_raw():
+    """Restore termios and leave alternate screen, but keep the notification pipe."""
     # Disable mouse tracking, show cursor, leave alternate screen
     sys.stdout.buffer.write(b'\033[?1006l\033[?1000l\033[?25h\033[?1049l')
     sys.stdout.buffer.flush()
     if _saved_termios is not None:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, _saved_termios)
-    # Close notification pipe
+
+def term_restore():
+    """Full cleanup: restore termios, leave alternate screen, close notification pipe."""
+    global _notify_r, _notify_w
+    _leave_raw()
     for fd in (_notify_r, _notify_w):
         if fd >= 0:
             try:
@@ -172,7 +175,7 @@ def term_restore():
 
 def term_suspend():
     """Restore terminal for an external command (editor, pager, etc.)."""
-    term_restore()
+    _leave_raw()
 
 def term_resume():
     """Re-enter raw mode and alternate screen after an external command."""
@@ -209,8 +212,8 @@ def read_key():
                 os.read(_notify_r, 1024)
             except OSError:
                 pass
-            if fd not in ready:
-                return '_notify'
+            # Always deliver _notify first; stdin stays buffered for next call
+            return '_notify'
         break  # stdin is ready
 
     def _read1():
@@ -493,9 +496,11 @@ def _run_plan(*args):
             [PLAN_BIN] + list(args),
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
         )
     except Exception:
-        # Return a fake CompletedProcess on failure
+        # Return a fake CompletedProcess on failure (timeout, missing binary, etc.)
         return subprocess.CompletedProcess(
             args=[PLAN_BIN] + list(args),
             returncode=1,
@@ -559,10 +564,9 @@ def plan_list(scope):
 
 def plan_get(ticket_id):
     """Get ticket details. Returns raw text string."""
-    if 'preview' not in _cache:
-        _cache['preview'] = {}
-    if ticket_id in _cache['preview']:
-        return _cache['preview'][ticket_id]
+    hit = _cache.get('preview', {}).get(ticket_id)
+    if hit is not None:
+        return hit
 
     if ticket_id == 0:
         result = _run_plan('project', 'get')
@@ -573,16 +577,15 @@ def plan_get(ticket_id):
         return ''
 
     text = result.stdout
-    _cache['preview'][ticket_id] = text
+    _cache.setdefault('preview', {})[ticket_id] = text
     return text
 
 
 def plan_children(ticket_id):
     """Get direct children of a ticket. Returns list of dicts."""
-    if 'children' not in _cache:
-        _cache['children'] = {}
-    if ticket_id in _cache['children']:
-        return _cache['children'][ticket_id]
+    hit = _cache.get('children', {}).get(ticket_id)
+    if hit is not None:
+        return hit
 
     result = _run_plan(
         str(ticket_id), '-r',
@@ -591,7 +594,7 @@ def plan_children(ticket_id):
     )
 
     if result.returncode != 0:
-        _cache['children'][ticket_id] = []
+        _cache.setdefault('children', {})[ticket_id] = []
         return []
 
     lines = result.stdout.splitlines()
@@ -614,7 +617,7 @@ def plan_children(ticket_id):
         if ticket['depth'] == parent_depth + 1:
             children.append(ticket)
 
-    _cache['children'][ticket_id] = children
+    _cache.setdefault('children', {})[ticket_id] = children
     return children
 
 
@@ -880,9 +883,8 @@ def reload():
     update_preview()
 
 
-_preview_gen = 0          # incremented on each new request; stale results discarded
 _preview_event = threading.Event()
-_preview_req = None       # (gen, tid) — latest pending request
+_preview_req = None       # ticket ID — latest requested ticket (written by main, read by worker)
 _preview_result = None    # (text, children) — set by worker, consumed by main thread
 _preview_worker_started = False
 
@@ -890,31 +892,24 @@ def _preview_worker():
     """Single background thread: fetch preview data one request at a time.
 
     Lets each subprocess finish naturally — never kills mid-flight.
-    After each subprocess completes, checks if the request is still current.
-    If a newer request arrived while we were busy, loops immediately to serve it.
+    After each fetch, delivers the result to the main thread unconditionally.
+    Then checks if _preview_req still matches — if not, loops to serve the
+    newer request immediately.
 
-    Stores results in _preview_result for the main thread to consume — never
-    touches needs_redraw directly (avoiding a cross-thread race on set replacement).
+    Never writes to _preview_req (only the main thread does).
+    Never touches needs_redraw (avoiding a cross-thread race on set replacement).
     """
-    global _preview_req, _preview_result
+    global _preview_result
     while True:
         _preview_event.wait()
         _preview_event.clear()
 
         while True:
-            # Grab the latest request
-            req = _preview_req
-            _preview_req = None
-            if req is None:
-                break
-            gen, tid = req
-
-            if gen != _preview_gen:
+            tid = _preview_req
+            if tid is None:
                 break
 
             text = plan_get(tid)
-            if gen != _preview_gen:
-                continue  # stale — but check if a newer request is pending
 
             if tid == 0:
                 tickets = all_tickets
@@ -926,11 +921,12 @@ def _preview_worker():
             else:
                 ch = plan_children(tid)
 
-            if gen != _preview_gen:
-                continue  # stale — check for newer request
-
             _preview_result = (text, ch)
             notify_wake()
+
+            # If a newer request arrived while we were busy, loop immediately
+            if _preview_req != tid:
+                continue
             break
 
 
@@ -947,14 +943,17 @@ def apply_preview_result():
 
 def update_preview():
     """Request async refresh of preview_text and children_list for cursor ticket."""
-    global _last_preview_id, _preview_scroll, _preview_gen, _preview_req
+    global _last_preview_id, _preview_scroll, _preview_req
     global _preview_worker_started, preview_text, children_list, needs_redraw
+
+    if not show_preview:
+        return
 
     vis = visible_tickets()
     if not vis or cursor < 0 or cursor >= len(vis):
         if _last_preview_id != -1:
             _last_preview_id = -1
-            _preview_gen += 1
+            _preview_req = None
             preview_text = ''
             children_list = []
             needs_redraw.add('subtickets')
@@ -964,17 +963,9 @@ def update_preview():
     ticket = vis[cursor]
     tid = ticket['id']
 
-    if tid == _last_preview_id:
-        return  # already showing this ticket
-
+    if tid != _last_preview_id:
+        _preview_scroll = 0
     _last_preview_id = tid
-    _preview_scroll = 0
-
-    # Clear stale content immediately so the pane doesn't show the wrong ticket
-    preview_text = ''
-    children_list = []
-    needs_redraw.add('subtickets')
-    needs_redraw.add('preview')
 
     # Start the worker thread once
     if not _preview_worker_started:
@@ -982,9 +973,8 @@ def update_preview():
         t = threading.Thread(target=_preview_worker, daemon=True)
         t.start()
 
-    # Submit new request (overwrites any pending; in-flight finishes naturally)
-    _preview_gen += 1
-    _preview_req = (_preview_gen, tid)
+    # Submit request — always wake the worker so reload() refreshes same ticket
+    _preview_req = tid
     _preview_event.set()
 
 
@@ -2046,10 +2036,10 @@ def action_move():
     global insert_mode, insert_pos, insert_depth, insert_callback, insert_label, needs_redraw
 
     if not selected:
-        _status_bar_message('Select tickets to move first')
-        read_key()
-        needs_redraw = {'all'}
-        return
+        t = cursor_ticket()
+        if t is None or t['id'] == 0:
+            return
+        selected.add(t['id'])
 
     vis = visible_tickets()
     if not vis:
@@ -2567,6 +2557,8 @@ def _handle_normal_key(key):
         # Toggle preview pane
         show_preview = not show_preview
         needs_redraw = {'all'}
+        if show_preview:
+            update_preview()
 
     elif key == 'shift-down':
         # Scroll preview pane down (works for ticket preview and help)

@@ -72,7 +72,7 @@ def _handle_sigwinch(signum, frame):
 
 def _handle_sigtstp(signum, frame):
     """Restore terminal, then re-raise SIGTSTP with the default handler."""
-    term_restore()
+    _leave_raw()
     # Temporarily set default handler so re-raise actually stops the process
     signal.signal(signal.SIGTSTP, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGTSTP)
@@ -121,15 +121,18 @@ def term_init():
     signal.signal(signal.SIGTSTP, _handle_sigtstp)
     signal.signal(signal.SIGCONT, _handle_sigcont)
 
-def term_restore():
-    """Restore termios, leave alternate screen, show cursor."""
-    global _saved_termios, _notify_r, _notify_w
+def _leave_raw():
+    """Restore termios and leave alternate screen, but keep the notification pipe."""
     # Disable mouse tracking, show cursor, leave alternate screen
     sys.stdout.buffer.write(b'\033[?1006l\033[?1000l\033[?25h\033[?1049l')
     sys.stdout.buffer.flush()
     if _saved_termios is not None:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, _saved_termios)
-    # Close notification pipe
+
+def term_restore():
+    """Full cleanup: restore termios, leave alternate screen, close notification pipe."""
+    global _notify_r, _notify_w
+    _leave_raw()
     for fd in (_notify_r, _notify_w):
         if fd >= 0:
             try:
@@ -142,7 +145,7 @@ def term_restore():
 
 def term_suspend():
     """Restore terminal for an external command (editor, pager, etc.)."""
-    term_restore()
+    _leave_raw()
 
 def term_resume():
     """Re-enter raw mode and alternate screen after an external command."""
@@ -179,8 +182,8 @@ def read_key():
                 os.read(_notify_r, 1024)
             except OSError:
                 pass
-            if fd not in ready:
-                return '_notify'
+            # Always deliver _notify first; stdin stays buffered for next call
+            return '_notify'
         break  # stdin is ready
 
     def _read1():

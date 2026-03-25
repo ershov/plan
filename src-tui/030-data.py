@@ -25,9 +25,11 @@ def _run_plan(*args):
             [PLAN_BIN] + list(args),
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
         )
     except Exception:
-        # Return a fake CompletedProcess on failure
+        # Return a fake CompletedProcess on failure (timeout, missing binary, etc.)
         return subprocess.CompletedProcess(
             args=[PLAN_BIN] + list(args),
             returncode=1,
@@ -91,10 +93,9 @@ def plan_list(scope):
 
 def plan_get(ticket_id):
     """Get ticket details. Returns raw text string."""
-    if 'preview' not in _cache:
-        _cache['preview'] = {}
-    if ticket_id in _cache['preview']:
-        return _cache['preview'][ticket_id]
+    hit = _cache.get('preview', {}).get(ticket_id)
+    if hit is not None:
+        return hit
 
     if ticket_id == 0:
         result = _run_plan('project', 'get')
@@ -105,16 +106,15 @@ def plan_get(ticket_id):
         return ''
 
     text = result.stdout
-    _cache['preview'][ticket_id] = text
+    _cache.setdefault('preview', {})[ticket_id] = text
     return text
 
 
 def plan_children(ticket_id):
     """Get direct children of a ticket. Returns list of dicts."""
-    if 'children' not in _cache:
-        _cache['children'] = {}
-    if ticket_id in _cache['children']:
-        return _cache['children'][ticket_id]
+    hit = _cache.get('children', {}).get(ticket_id)
+    if hit is not None:
+        return hit
 
     result = _run_plan(
         str(ticket_id), '-r',
@@ -123,7 +123,7 @@ def plan_children(ticket_id):
     )
 
     if result.returncode != 0:
-        _cache['children'][ticket_id] = []
+        _cache.setdefault('children', {})[ticket_id] = []
         return []
 
     lines = result.stdout.splitlines()
@@ -146,7 +146,7 @@ def plan_children(ticket_id):
         if ticket['depth'] == parent_depth + 1:
             children.append(ticket)
 
-    _cache['children'][ticket_id] = children
+    _cache.setdefault('children', {})[ticket_id] = children
     return children
 
 

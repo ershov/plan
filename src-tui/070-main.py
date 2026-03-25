@@ -490,6 +490,8 @@ def _handle_normal_key(key):
         # Toggle preview pane
         show_preview = not show_preview
         needs_redraw = {'all'}
+        if show_preview:
+            update_preview()
 
     elif key == 'shift-down':
         # Scroll preview pane down (works for ticket preview and help)

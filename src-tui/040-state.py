@@ -175,9 +175,8 @@ def reload():
     update_preview()
 
 
-_preview_gen = 0          # incremented on each new request; stale results discarded
 _preview_event = threading.Event()
-_preview_req = None       # (gen, tid) — latest pending request
+_preview_req = None       # ticket ID — latest requested ticket (written by main, read by worker)
 _preview_result = None    # (text, children) — set by worker, consumed by main thread
 _preview_worker_started = False
 
@@ -185,31 +184,24 @@ def _preview_worker():
     """Single background thread: fetch preview data one request at a time.
 
     Lets each subprocess finish naturally — never kills mid-flight.
-    After each subprocess completes, checks if the request is still current.
-    If a newer request arrived while we were busy, loops immediately to serve it.
+    After each fetch, delivers the result to the main thread unconditionally.
+    Then checks if _preview_req still matches — if not, loops to serve the
+    newer request immediately.
 
-    Stores results in _preview_result for the main thread to consume — never
-    touches needs_redraw directly (avoiding a cross-thread race on set replacement).
+    Never writes to _preview_req (only the main thread does).
+    Never touches needs_redraw (avoiding a cross-thread race on set replacement).
     """
-    global _preview_req, _preview_result
+    global _preview_result
     while True:
         _preview_event.wait()
         _preview_event.clear()
 
         while True:
-            # Grab the latest request
-            req = _preview_req
-            _preview_req = None
-            if req is None:
-                break
-            gen, tid = req
-
-            if gen != _preview_gen:
+            tid = _preview_req
+            if tid is None:
                 break
 
             text = plan_get(tid)
-            if gen != _preview_gen:
-                continue  # stale — but check if a newer request is pending
 
             if tid == 0:
                 tickets = all_tickets
@@ -221,11 +213,12 @@ def _preview_worker():
             else:
                 ch = plan_children(tid)
 
-            if gen != _preview_gen:
-                continue  # stale — check for newer request
-
             _preview_result = (text, ch)
             notify_wake()
+
+            # If a newer request arrived while we were busy, loop immediately
+            if _preview_req != tid:
+                continue
             break
 
 
@@ -242,14 +235,17 @@ def apply_preview_result():
 
 def update_preview():
     """Request async refresh of preview_text and children_list for cursor ticket."""
-    global _last_preview_id, _preview_scroll, _preview_gen, _preview_req
+    global _last_preview_id, _preview_scroll, _preview_req
     global _preview_worker_started, preview_text, children_list, needs_redraw
+
+    if not show_preview:
+        return
 
     vis = visible_tickets()
     if not vis or cursor < 0 or cursor >= len(vis):
         if _last_preview_id != -1:
             _last_preview_id = -1
-            _preview_gen += 1
+            _preview_req = None
             preview_text = ''
             children_list = []
             needs_redraw.add('subtickets')
@@ -259,17 +255,9 @@ def update_preview():
     ticket = vis[cursor]
     tid = ticket['id']
 
-    if tid == _last_preview_id:
-        return  # already showing this ticket
-
+    if tid != _last_preview_id:
+        _preview_scroll = 0
     _last_preview_id = tid
-    _preview_scroll = 0
-
-    # Clear stale content immediately so the pane doesn't show the wrong ticket
-    preview_text = ''
-    children_list = []
-    needs_redraw.add('subtickets')
-    needs_redraw.add('preview')
 
     # Start the worker thread once
     if not _preview_worker_started:
@@ -277,9 +265,8 @@ def update_preview():
         t = threading.Thread(target=_preview_worker, daemon=True)
         t.start()
 
-    # Submit new request (overwrites any pending; in-flight finishes naturally)
-    _preview_gen += 1
-    _preview_req = (_preview_gen, tid)
+    # Submit request — always wake the worker so reload() refreshes same ticket
+    _preview_req = tid
     _preview_event.set()
 
 

@@ -321,10 +321,10 @@ def action_move():
     global insert_mode, insert_pos, insert_depth, insert_callback, insert_label, needs_redraw
 
     if not selected:
-        _status_bar_message('Select tickets to move first')
-        read_key()
-        needs_redraw = {'all'}
-        return
+        t = cursor_ticket()
+        if t is None or t['id'] == 0:
+            return
+        selected.add(t['id'])
 
     vis = visible_tickets()
     if not vis:
