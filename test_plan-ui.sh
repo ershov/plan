@@ -20,7 +20,7 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" pattern="$2" actual="$3"
-  if echo "$actual" | grep -qP "$pattern"; then
+  if echo "$actual" | grep -qE "$pattern"; then
     ((PASS++))
   else
     ((FAIL++))
@@ -106,7 +106,7 @@ echo -n "0" > "$PLZF_DEPTH"
 OUT=$("$SELF" --function list)
 assert_contains "depth-filtered list shows Alpha" '#1.*Alpha' "$OUT"
 assert_contains "depth-filtered list shows Beta" '#2.*Beta' "$OUT"
-if echo "$OUT" | grep -qP 'Beta child'; then
+if echo "$OUT" | grep -qE 'Beta child'; then
   ((FAIL++)); ERRORS+=("FAIL: depth filter should hide children")
 else
   ((PASS++))

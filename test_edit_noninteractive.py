@@ -140,10 +140,12 @@ class TestNonInteractiveEditEndToEnd(unittest.TestCase):
     def _run_plan(self, *args):
         """Run plan.main with given args, capturing stdout."""
         import io
-        from contextlib import redirect_stdout
+        from contextlib import redirect_stdout, redirect_stderr
         out = io.StringIO()
-        with redirect_stdout(out):
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
             plan.main(list(args) + ["-f", self.plan_file])
+        self._last_stderr = err.getvalue()
         return out.getvalue()
 
     def _edit_files(self):
@@ -152,8 +154,9 @@ class TestNonInteractiveEditEndToEnd(unittest.TestCase):
 
     def test_start_creates_edit_file(self):
         output = self._run_plan("edit", "--start", "1")
-        self.assertIn("Edit", output)
         self.assertIn(".PLAN-edit-1-", output)
+        self.assertIn("Edit", self._last_stderr)
+        self.assertIn("-f", self._last_stderr)
         edit_files = self._edit_files()
         self.assertEqual(len(edit_files), 1)
         # Verify file contents
@@ -268,6 +271,95 @@ class TestNonInteractiveEditEndToEnd(unittest.TestCase):
         fname = os.path.basename(edit_files[0])
         decoded = plan._edit_file_decode(fname, ".PLAN.md")
         self.assertIn("r", decoded[1])
+
+
+class TestEditRoundTripIndentation(unittest.TestCase):
+    """Round-trip edit must not alter indentation of unedited content."""
+
+    PLAN_WITH_NESTED = textwrap.dedent("""\
+        # Project {#project}
+
+        ## Metadata {#metadata}
+
+            next_id: 100
+
+        ## Tickets {#tickets}
+
+        * ## Ticket: Task: 1 {#1}
+
+          qwe asd zxc
+
+          * ## Ticket: Task: 2 {#2}
+
+            asdzxc cvb
+
+            * ## Ticket: Task: C/C++ Backend (future) {#3}
+
+            qwe ert rty
+
+            - aaaaa
+              zzzzz
+              xxxxx
+    """)
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.plan_file = os.path.join(self.tmpdir, ".PLAN.md")
+        with open(self.plan_file, "w") as f:
+            f.write(self.PLAN_WITH_NESTED)
+
+    def tearDown(self):
+        for f in glob.glob(os.path.join(self.tmpdir, "*")):
+            os.unlink(f)
+        for f in glob.glob(os.path.join(self.tmpdir, ".*")):
+            if os.path.isfile(f):
+                os.unlink(f)
+        os.rmdir(self.tmpdir)
+
+    def _run_plan(self, *args):
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            plan.main(list(args) + ["-f", self.plan_file])
+        return out.getvalue()
+
+    def _edit_files(self):
+        return glob.glob(os.path.join(self.tmpdir, ".PLAN-edit-*.md"))
+
+    def _round_trip(self, ticket_id, recursive=False):
+        """Start edit, append a line, accept, return plan content."""
+        args = ["edit", "--start", ticket_id]
+        if recursive:
+            args.append("-r")
+        self._run_plan(*args)
+        edit_files = self._edit_files()
+        self.assertEqual(len(edit_files), 1)
+        with open(edit_files[0], "a") as f:
+            f.write("added line\n")
+        self._run_plan("edit", "--accept", ticket_id)
+        with open(self.plan_file) as f:
+            return f.read()
+
+    def test_nonrecursive_preserves_child_indent(self):
+        """Non-recursive edit of parent must not alter children indentation."""
+        original = self.PLAN_WITH_NESTED
+        result = self._round_trip("1")
+        # The only difference should be the added line in ticket 1's body
+        for line in original.splitlines():
+            if line.strip():
+                self.assertIn(line, result,
+                    f"Original line missing or altered: {line!r}")
+
+    def test_recursive_preserves_body_indent(self):
+        """Recursive edit must preserve body indentation of nested tickets."""
+        original = self.PLAN_WITH_NESTED
+        result = self._round_trip("1", recursive=True)
+        for line in original.splitlines():
+            if line.strip():
+                self.assertIn(line, result,
+                    f"Original line missing or altered: {line!r}")
 
 
 class TestEditFileGlob(unittest.TestCase):

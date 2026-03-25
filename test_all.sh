@@ -22,7 +22,7 @@ run_suite() {
 }
 
 run_suite "Unit tests (test_plan.py)"          python3 -m unittest "$SCRIPT_DIR/test_plan.py"
-run_suite "Scenario tests (test_scenarios.py)" python3 -m unittest "$SCRIPT_DIR/test_scenarios.py"
+run_suite "Scenario tests (test_scenarios.py)" python3 "$SCRIPT_DIR/test_scenarios.py"
 run_suite "Scenario tests (test_scenarios.sh)" bash "$SCRIPT_DIR/test_scenarios.sh"
 run_suite "Bulk tests (test_bulk.sh)"          bash "$SCRIPT_DIR/test_bulk.sh"
 run_suite "UI tests (test_plan-ui.sh)"            bash "$SCRIPT_DIR/test_plan-ui.sh"
@@ -34,10 +34,10 @@ echo ""
 echo "========================================="
 echo "  Summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed"
 echo "========================================="
-for s in "${PASSED[@]}"; do
+for s in ${PASSED[@]+"${PASSED[@]}"}; do
     echo "  PASS  $s"
 done
-for s in "${FAILED[@]}"; do
+for s in ${FAILED[@]+"${FAILED[@]}"}; do
     echo "  FAIL  $s"
 done
 

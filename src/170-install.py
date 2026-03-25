@@ -122,7 +122,7 @@ def _handle_install(scope):
             _write_json(settings_path, settings)
     else:
         # User scope: register in installed_plugins.json (like marketplace install)
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         installed_path = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
         installed = _read_json(installed_path)
         if installed.get("version") != 2:

@@ -44,9 +44,9 @@ except ImportError:
 # }}} # SOURCE END: 010-preambula.py
 
 # SOURCE START: 015-version+.sh {{{
-VERSION_A = [1, 0, 6]
-VERSION_STR = "1.0.6"
-VERSION_DATE = "2026-03-22"
+VERSION_A = [1, 0, 8]
+VERSION_STR = "1.0.8"
+VERSION_DATE = "2026-03-25"
 # }}} # SOURCE END: 015-version+.sh
 
 # SOURCE START: 020-constants.py {{{
@@ -3828,11 +3828,8 @@ def _edit_export_content(project, ticket, recursive):
     return "\n".join(out)
 
 
-def _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename):
-    """Handle 'edit --start' — export ticket to temp file for non-interactive editing."""
-    if not cmd_args:
-        raise SystemExit("Error: edit --start requires a ticket ID")
-    node_id = cmd_args[0]
+def _edit_export_to_file(project, node_id, req, plan_dir, plan_filename):
+    """Export ticket content to a temp file and print path to stdout, help to stderr."""
     node = project.lookup(node_id)
     if node is None:
         raise SystemExit(f"Error: ticket #{node_id} not found")
@@ -3840,15 +3837,6 @@ def _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename):
         raise SystemExit("Error: non-interactive edit is only supported for tickets")
 
     recursive = req.flags.get("recursive", False)
-
-    # Check for existing edit file
-    existing = _edit_file_glob(plan_dir, plan_filename, ticket_id=node_id)
-    if existing:
-        raise SystemExit(
-            f"Error: edit already in progress for #{node_id}. "
-            f"Use --restart {node_id} or --abort {node_id}.")
-
-    # Export content
     text = _edit_export_content(project, node, recursive)
     content_hash = _edit_content_hash(text)
     flags = set()
@@ -3860,7 +3848,28 @@ def _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename):
     with open(filepath, "w") as f:
         f.write(text)
 
-    print(f"Edit {filename} then run \"plan edit --accept\" when done.")
+    file_flag = req.flags.get("file")
+    accept_cmd = "plan edit --accept"
+    if file_flag:
+        accept_cmd = f"plan -f {file_flag} edit --accept"
+    print(filepath)
+    print(f"Edit {filename} then run \"{accept_cmd}\" when done.", file=sys.stderr)
+
+
+def _handle_edit_start(project, cmd_args, req, plan_dir, plan_filename):
+    """Handle 'edit --start' — export ticket to temp file for non-interactive editing."""
+    if not cmd_args:
+        raise SystemExit("Error: edit --start requires a ticket ID")
+    node_id = cmd_args[0]
+
+    # Check for existing edit file
+    existing = _edit_file_glob(plan_dir, plan_filename, ticket_id=node_id)
+    if existing:
+        raise SystemExit(
+            f"Error: edit already in progress for #{node_id}. "
+            f"Use --restart {node_id} or --abort {node_id}.")
+
+    _edit_export_to_file(project, node_id, req, plan_dir, plan_filename)
 
 
 def _handle_edit_restart(project, cmd_args, req, plan_dir, plan_filename):
@@ -3874,27 +3883,7 @@ def _handle_edit_restart(project, cmd_args, req, plan_dir, plan_filename):
     for _fname, fpath in existing:
         os.unlink(fpath)
 
-    # Now do the same as --start (skip existence check)
-    node = project.lookup(node_id)
-    if node is None:
-        raise SystemExit(f"Error: ticket #{node_id} not found")
-    if not isinstance(node, Ticket):
-        raise SystemExit("Error: non-interactive edit is only supported for tickets")
-
-    recursive = req.flags.get("recursive", False)
-
-    text = _edit_export_content(project, node, recursive)
-    content_hash = _edit_content_hash(text)
-    flags = set()
-    if recursive:
-        flags.add("r")
-    filename = _edit_file_encode(plan_filename, node_id, flags, content_hash)
-    filepath = os.path.join(plan_dir, filename)
-
-    with open(filepath, "w") as f:
-        f.write(text)
-
-    print(f"Edit {filename} then run \"plan edit --accept\" when done.")
+    _edit_export_to_file(project, node_id, req, plan_dir, plan_filename)
 
 
 def _handle_edit_accept(project, cmd_args, req, plan_dir, plan_filename):
@@ -4056,27 +4045,21 @@ def _apply_edit_to_ticket(project, ticket, new_text, include_children):
         new_root._rank = ticket._rank
         new_root.dirty = True
 
+        # Mark all parsed descendants dirty (body lines are already
+        # correctly indented from the re-indent + parse step).
+        def _mark_dirty(t):
+            t.dirty = True
+            for c in t.children:
+                _mark_dirty(c)
+        for nt in new_tickets:
+            _mark_dirty(nt)
+
         # Restore original children if not editing recursively
+        # (done after _mark_dirty so saved children aren't touched)
         if saved_children is not None:
             new_root.children = saved_children
             for child in saved_children:
                 child.parent = new_root
-
-        # Mark all descendants dirty and fix body indentation
-        def _fixup(t):
-            t.dirty = True
-            content_indent = " " * (t.indent_level + 2)
-            fixed = []
-            for bl in t.body_lines:
-                if bl.strip():
-                    fixed.append(content_indent + bl.lstrip())
-                else:
-                    fixed.append("")
-            t.body_lines = fixed
-            for c in t.children:
-                _fixup(c)
-        for nt in new_tickets:
-            _fixup(nt)
 
         # Fill defaults for new tickets created during edit
         if new_ids:
@@ -4291,27 +4274,21 @@ def _handle_edit_recursive(project, ticket, editor, include_children=True):
         new_root._rank = ticket._rank
         new_root.dirty = True
 
+        # Mark all parsed descendants dirty (body lines are already
+        # correctly indented from the re-indent + parse step).
+        def _mark_dirty(t):
+            t.dirty = True
+            for c in t.children:
+                _mark_dirty(c)
+        for nt in new_tickets:
+            _mark_dirty(nt)
+
         # Restore original children if not editing recursively
+        # (done after _mark_dirty so saved children aren't touched)
         if saved_children is not None:
             new_root.children = saved_children
             for child in saved_children:
                 child.parent = new_root
-
-        # Mark all descendants dirty and fix body indentation
-        def _fixup(t):
-            t.dirty = True
-            content_indent = " " * (t.indent_level + 2)
-            fixed = []
-            for bl in t.body_lines:
-                if bl.strip():
-                    fixed.append(content_indent + bl.lstrip())
-                else:
-                    fixed.append("")
-            t.body_lines = fixed
-            for c in t.children:
-                _fixup(c)
-        for nt in new_tickets:
-            _fixup(nt)
 
         # Fill defaults for new tickets created during edit
         if new_ids:
@@ -5481,7 +5458,7 @@ _PLUGIN_FILES = {
     '.claude-plugin/plugin.json': r'''{
   "name": "claude-plan",
   "description": "Integrate the plan CLI ticket tracker with Claude Code for structured planning and team coordination",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "license": "MIT",
   "keywords": ["planning", "tickets", "task-tracking", "team-coordination"]
 }
@@ -5969,7 +5946,7 @@ def _handle_install(scope):
             _write_json(settings_path, settings)
     else:
         # User scope: register in installed_plugins.json (like marketplace install)
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         installed_path = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
         installed = _read_json(installed_path)
         if installed.get("version") != 2:

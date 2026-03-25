@@ -20,7 +20,7 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" pattern="$2" actual="$3"
-  if echo "$actual" | grep -qP "$pattern"; then
+  if echo "$actual" | grep -qE "$pattern"; then
     ((PASS++))
   else
     ((FAIL++))
@@ -111,7 +111,7 @@ vis = visible_tickets()
 for t in vis:
     print('{id}\t{title}'.format(**t))
 ")
-if echo "$OUT" | grep -qP 'Beta child'; then
+if echo "$OUT" | grep -qE 'Beta child'; then
   ((FAIL++)); ERRORS+=("FAIL: collapsed view should hide children")
 else
   ((PASS++))

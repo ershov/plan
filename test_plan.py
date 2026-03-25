@@ -2033,7 +2033,7 @@ class TestFileDiscovery(unittest.TestCase):
         """discover_file finds .PLAN.md by walking up from cwd."""
         old = os.environ.pop("PLAN_MD", None)
         old_cwd = os.getcwd()
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = os.path.realpath(tempfile.mkdtemp())
         try:
             # Create .PLAN.md in tmpdir, then cd into a subdirectory
             plan_path = os.path.join(tmpdir, ".PLAN.md")
@@ -2055,7 +2055,7 @@ class TestFileDiscovery(unittest.TestCase):
         """discover_file finds .PLAN.md in the current directory itself."""
         old = os.environ.pop("PLAN_MD", None)
         old_cwd = os.getcwd()
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = os.path.realpath(tempfile.mkdtemp())
         try:
             plan_path = os.path.join(tmpdir, ".PLAN.md")
             with open(plan_path, 'w') as f:
