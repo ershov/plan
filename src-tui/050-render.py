@@ -4,6 +4,56 @@
 
 _scroll_offset = 0  # scroll offset for list pane
 
+# Status color map: fg color code, bold flag
+_STATUS_STYLE = {
+    'in-progress': (2, True),    # bold green — active work
+    'open':        (2, False),   # green — ready
+    'blocked':     (1, True),    # bold red — needs attention
+    'assigned':    (6, False),   # cyan — delegated
+    'reviewing':   (5, False),   # magenta — verification
+    'testing':     (5, False),   # magenta — verification
+    'backlog':     (3, False),   # yellow — deferred
+    'deferred':    (3, False),
+    'future':      (3, False),
+    'someday':     (3, False),
+    'wishlist':    (3, False),
+    'paused':      (3, False),
+    'on-hold':     (3, False),
+    'done':        (8, False),   # gray — closed
+    'wontfix':     (8, False),
+}
+_CLOSED_STATUSES_TUI = {'done', 'wontfix'}
+_ID_COLOR = 3   # yellow for ticket IDs
+
+
+def _write_colored_ticket(pre, marker_text, tid, status, title, cols):
+    """Write a ticket line with per-segment coloring. Handles truncation."""
+    id_str = '#{}'.format(tid)
+    status_str = '[{}]'.format(status)
+    sfg, sbold = _STATUS_STYLE.get(status, (None, False))
+    segments = [
+        (pre, None, False),
+        (marker_text, 4, False),  # blue marker
+        (id_str, _ID_COLOR, False),
+        (' ', None, False),
+        (status_str, sfg, sbold),
+        (' ', None, False),
+        (title, None, False),
+    ]
+    pos = 0
+    for text, fg, bold in segments:
+        if pos >= cols:
+            break
+        remaining = cols - pos
+        chunk = text[:remaining]
+        if fg is not None or bold:
+            set_style(fg=fg, bold=bold)
+            write(chunk)
+            reset_style()
+        else:
+            write(chunk)
+        pos += len(chunk)
+
 
 def layout_panes():
     """Calculate pane positions. Returns dict with geometry for all panes."""
@@ -204,7 +254,7 @@ def render_list(top, height, cols):
             reset_style()
             continue
 
-        is_selected = (tid in selected)
+        is_selected = (tid in selected) and tid != 0
         is_search_match = _search_matches(_search_text(ticket))
 
         # Build the line content
@@ -254,26 +304,21 @@ def render_list(top, height, cols):
             _write_highlighted(line, base_fg=6, base_bold=True)
         elif is_search_match:
             _write_highlighted(line)
+        elif tid == 0:
+            write(line)
         else:
-            # Normal line — render marker in blue if present
-            if tid != 0 and ticket['has_children']:
+            # Normal ticket line — colored segments
+            rel_depth = ticket['depth'] - base_depth
+            if rel_depth < 0:
+                rel_depth = 0
+            pre = prefix + '  ' * rel_depth
+            if ticket['has_children']:
                 marker_text = '\u25bc ' if tid in expanded else '\u25b6 '
-                pre = prefix + ('  ' * (ticket['depth'] - base_depth if ticket['depth'] - base_depth > 0 else 0))
-                rest = '#{} [{}] {}'.format(tid, ticket['status'], ticket['title'])
-                full = pre + marker_text + rest
-                if len(full) > cols:
-                    full = full[:cols]
-                write(pre)
-                pre_len = len(pre)
-                marker_end = pre_len + len(marker_text)
-                if pre_len < cols:
-                    set_style(fg=4)
-                    write(full[pre_len:min(marker_end, cols)])
-                    reset_style()
-                if marker_end < cols:
-                    write(full[marker_end:])
             else:
-                write(line)
+                marker_text = '  '
+            _write_colored_ticket(
+                pre, marker_text, tid,
+                ticket['status'], ticket['title'], cols)
 
 
 _SUB_WRAP = 80   # wrap child entries at this width
@@ -404,23 +449,42 @@ def render_subtickets(top, height, cols, info=False):
 
     total_rows = max((len(cl) for cl in col_lines), default=0)
 
+    # Map (column, row) -> child status for first lines of each entry
+    col_child_status = []
+    for start, end in ranges:
+        status_map = {}
+        line_idx = 0
+        for idx in range(start, end):
+            status_map[line_idx] = children_list[idx]
+            line_idx += len(entry_lines[idx])
+        col_child_status.append(status_map)
+
     for row in range(content_lines):
         move(top + 1 + row, 1)
         clear_line()
         if row >= total_rows:
             continue
-        parts = []
+        col_pos = 0
         for c in range(num_cols):
             cl = col_lines[c]
             cell = cl[row] if row < len(cl) else ''
             if c < num_cols - 1:
-                parts.append(cell.ljust(col_width)[:col_width])
+                width = col_width
             else:
-                parts.append(cell)
-        line = ''.join(parts)
-        if len(line) > cols:
-            line = line[:cols]
-        write(line)
+                width = cols - col_pos
+            if width <= 0:
+                break
+            child = col_child_status[c].get(row)
+            if child is not None:
+                _write_colored_ticket(
+                    '', '', child['id'], child['status'],
+                    child['title'], min(width, len(cell)))
+                pad = width - len(cell)
+                if pad > 0:
+                    write(' ' * pad)
+            else:
+                write(cell[:width].ljust(width)[:width])
+            col_pos += width
 
 
 def _preview_lines():
@@ -525,7 +589,7 @@ def _render_sep(row, cols, label, info=False):
         if insert_mode:
             hints = 'enter:ok  \u2190\u2192:indent  esc:cancel'
         else:
-            hints = ' n:new  e:edit  m:move  o/c/s:open/close/status  /:search  alt-\u2191\u2193:scope '
+            hints = ' c:new  e:edit  m:move  s:status  /:search  alt-\u2191\u2193:scope '
         avail = cols - pos - len(label_str) - 3  # room before label
         if avail > 10:
             h = hints[:avail]
@@ -643,18 +707,16 @@ SELECTION
   Ctrl-N           Deselect all
 
 ACTIONS
-  s                Change status
-  c                Close ticket
-  o                Reopen ticket
+  s                Change status (with fzf-style filter)
   e                Edit in editor
   E                Edit recursively
-  n                Create (enter insert mode)
-  N                Create bulk/recursive
+  c                Create (enter insert mode)
+  C                Create bulk/recursive
   m                Move (enter insert mode)
   v                View in pager
   V                View recursively
 
-INSERT MODE (n/m)
+INSERT MODE (c/m)
   j/k, Up/Down     Move insertion marker
   Right            Make child of entry above
   Left             Outdent
@@ -666,9 +728,11 @@ MOUSE
   Scroll wheel     Scroll area under mouse (list or preview)
 
 OTHER
+  ~                View command log in pager
   ?                Help (toggle)
   q                Quit
   Esc, Ctrl-C      Cancel / back to normal / quit
-  Ctrl-L           Refresh"""
+  Ctrl-L           Redraw screen
+  Ctrl-R           Reload from disk"""
 
 

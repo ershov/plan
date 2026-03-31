@@ -1,12 +1,7 @@
 
 ## Task tracking
 
-Use the `plan` CLI for ALL task tracking. Do not use TodoWrite or TaskCreate.
-
-Load skills:
-* `planning-with-plan` from `.claude/plugins/claude-plan/skills/planning-with-plan/SKILL.md`
-* `dispatch-with-plan` from `.claude/plugins/claude-plan/skills/dispatch-with-plan/SKILL.md`
-* `team-with-plan` from `.claude/plugins/claude-plan/skills/team-with-plan/SKILL.md`
+Use the `plan` CLI for ALL task tracking.
 
 ### Before starting work
 - Break the task into tickets: `plan create 'title="Step name"'`

@@ -82,6 +82,15 @@ def sort_by_rank(tickets):
     return sorted(tickets, key=lambda t: (_get_rank(t), t.node_id or 0))
 
 
+def _update_descendant_indent(ticket):
+    """Recursively update indent_level of all descendants after reparenting."""
+    for child in ticket.children:
+        if isinstance(child, Ticket):
+            child.indent_level = ticket.indent_level + 2
+            child.dirty = True
+            _update_descendant_indent(child)
+
+
 def _reparent_ticket(ticket, new_parent, project):
     """Move ticket under new_parent (None for root). Handles detach + attach."""
     old_parent = ticket.parent if isinstance(ticket.parent, Ticket) else None
@@ -104,6 +113,7 @@ def _reparent_ticket(ticket, new_parent, project):
         ticket.indent_level = 0
         project.tickets.append(ticket)
     ticket.dirty = True
+    _update_descendant_indent(ticket)
 
 
 def _resolve_move_expr(value, ticket, project):

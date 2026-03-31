@@ -14,6 +14,10 @@ Dispatch subagents via the Agent tool to execute tickets from `.PLAN.md`. You ar
 - You have tickets in `.PLAN.md` and want subagents to execute them
 - Single leader dispatching workers via the Agent tool
 
+Getting tickets overview/list:
+- `plan N -r ls` gives structured view of subtasks.
+- `plan N -r ls order` gives subtasks in order of execution.
+
 ## Leader Role
 
 You are the coordinator — do not implement tickets yourself.

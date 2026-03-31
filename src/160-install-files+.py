@@ -15,10 +15,19 @@ def quote(s):
     return "r'''" + s.replace("'''", "'''+" + '"' + "'''" + '"' + "+r'''") + "'''"
 
 
+def extract_marker(content):
+    """Extract the first ## heading from content."""
+    for line in content.splitlines():
+        if line.startswith("## "):
+            return line
+    return ""
+
+
 def main():
     src_dir = Path(__file__).resolve().parent
     plugin_dir = src_dir / "claude-template" / "plugins" / "claude-plan"
     claude_md_path = src_dir / "CLAUDE.md"
+    codex_md_path = src_dir / "CODEX.md"
 
     # --- Collect plugin files ---
     plugin_files = {
@@ -29,13 +38,11 @@ def main():
 
     # --- Read CLAUDE.md ---
     claude_md_content = claude_md_path.read_text()
+    claude_marker = extract_marker(claude_md_content)
 
-    # Extract marker (first ## heading)
-    marker = ""
-    for line in claude_md_content.splitlines():
-        if line.startswith("## "):
-            marker = line
-            break
+    # --- Read CODEX.md ---
+    codex_md_content = codex_md_path.read_text()
+    codex_marker = extract_marker(codex_md_content)
 
     # --- Generate output ---
     print("# ---------------------------------------------------------------------------")
@@ -62,7 +69,15 @@ def main():
     print()
 
     # _CLAUDE_MD_MARKER
-    print(f"_CLAUDE_MD_MARKER = {marker!r}")
+    print(f"_CLAUDE_MD_MARKER = {claude_marker!r}")
+    print()
+
+    # _CODEX_MD_SECTION
+    print(f"_CODEX_MD_SECTION = {quote(codex_md_content)}")
+    print()
+
+    # _CODEX_MD_MARKER
+    print(f"_CODEX_MD_MARKER = {codex_marker!r}")
     print()
     print()
 

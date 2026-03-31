@@ -139,7 +139,7 @@ def visible_tickets():
 
 def reload():
     """Reload all tickets from disk and refresh state."""
-    global all_tickets, cursor, needs_redraw
+    global all_tickets, cursor, needs_redraw, error_text
 
     # Save current cursor ticket ID for position restoration
     vis = visible_tickets()
@@ -150,6 +150,9 @@ def reload():
     _mark_visible_dirty()
     all_tickets = plan_list(scope)
     _mark_visible_dirty()  # all_tickets changed
+
+    if _last_list_error:
+        error_text = _last_list_error
 
     # Rebuild visible list
     vis = visible_tickets()
@@ -201,7 +204,7 @@ def _preview_worker():
             if tid is None:
                 break
 
-            text = plan_get(tid)
+            text, err = plan_get(tid)
 
             if tid == 0:
                 tickets = all_tickets
@@ -210,10 +213,12 @@ def _preview_worker():
                 else:
                     bd = 0
                 ch = [t for t in tickets if t['depth'] == bd]
+                ch_err = ''
             else:
-                ch = plan_children(tid)
+                ch, ch_err = plan_children(tid)
 
-            _preview_result = (text, ch)
+            preview_err = err or ch_err
+            _preview_result = (text, ch, preview_err)
             notify_wake()
 
             # If a newer request arrived while we were busy, loop immediately
@@ -224,11 +229,13 @@ def _preview_worker():
 
 def apply_preview_result():
     """Consume pending result from the preview worker (called on main thread only)."""
-    global preview_text, children_list, _preview_result, needs_redraw
+    global preview_text, children_list, error_text, _preview_result, needs_redraw
     result = _preview_result
     if result is not None:
         _preview_result = None
-        preview_text, children_list = result
+        preview_text, children_list, preview_err = result
+        if preview_err:
+            error_text = preview_err
         needs_redraw.add('subtickets')
         needs_redraw.add('preview')
 

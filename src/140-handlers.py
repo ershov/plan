@@ -1945,6 +1945,7 @@ def _handle_move_verb(project, targets, req):
             if new_parent:
                 new_parent.dirty = True
 
+        _update_descendant_indent(source)
         prev = source
         source.set_attr("updated", _now())
         source.dirty = True

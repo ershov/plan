@@ -69,6 +69,7 @@ def term_size():
 def _handle_sigwinch(signum, frame):
     global g_resize_flag
     g_resize_flag = True
+    notify_wake()
 
 def _handle_sigtstp(signum, frame):
     """Restore terminal, then re-raise SIGTSTP with the default handler."""

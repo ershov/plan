@@ -3,8 +3,11 @@
 ##############################################################################
 
 _KNOWN_STATUSES = [
-    'open', 'in-progress', 'assigned', 'blocked', 'reviewing', 'testing',
-    'backlog', 'deferred', 'future', 'someday', 'wishlist', 'paused', 'on-hold',
+    # Open — active (most used first)
+    'in-progress', 'open', 'blocked', 'assigned', 'reviewing', 'testing',
+    # Open — deferred
+    'backlog', 'deferred', 'paused', 'on-hold', 'future', 'someday', 'wishlist',
+    # Closed
     'done', 'wontfix',
 ]
 
@@ -67,6 +70,14 @@ def _read_string(prompt):
         flush()
 
         key = read_key()
+        if key == '_notify':
+            if g_resize_flag:
+                g_resize_flag = False
+                layout = layout_panes()
+                row = layout['info_row']
+                cols = layout['cols']
+                render_full()
+            continue
         if key == 'enter':
             return buf
         elif key in ('esc', 'ctrl-c'):
@@ -120,7 +131,7 @@ def action_reopen():
 
 
 def action_status():
-    """Status selection mini-mode."""
+    """Status selection with fzf-style filtering."""
     global needs_redraw
 
     # Determine affected ids
@@ -135,48 +146,92 @@ def action_status():
     if not ids:
         return
 
-    status_list = _KNOWN_STATUSES + ['custom...']
+    all_statuses = _KNOWN_STATUSES + ['custom...']
+    filter_query = ''
     status_cursor = 0
-    layout = layout_panes()
-    cols, _ = term_size()
+
+    def _filtered():
+        if not filter_query:
+            return list(all_statuses)
+        q = filter_query.lower()
+        return [s for s in all_statuses if q in s.lower()]
 
     while True:
+        layout = layout_panes()
+        cols, _ = term_size()
+        visible = _filtered()
+
+        # Clamp cursor
+        if status_cursor >= len(visible):
+            status_cursor = max(0, len(visible) - 1)
+
+        # Render filter prompt on info row
+        info_row = layout['info_row']
+        if info_row > 0:
+            S = '\u2500'
+            move(info_row, 1)
+            clear_line()
+            prompt = ' status> '
+            set_style(fg=11, bg=4, bold=True)
+            write(prompt[:cols])
+            pos = len(prompt)
+            if pos < cols:
+                _sb_style()
+                write(filter_query[:cols - pos])
+                pos += min(len(filter_query), cols - pos)
+            if pos < cols:
+                set_style(fg=8)
+                write(S * (cols - pos))
+            reset_style()
+
         # Render status list in the preview pane area
         top = layout['prev_top']
         height = layout['prev_height']
         for i in range(height):
             move(top + i, 1)
             clear_line()
-            idx = i
-            if idx < len(status_list):
-                label = status_list[idx]
-                if idx == status_cursor:
+            if i < len(visible):
+                label = visible[i]
+                if i == status_cursor:
                     set_style(reverse=True)
                     write(('  ' + label).ljust(cols)[:cols])
                     reset_style()
                 else:
                     write('  ' + label)
-            # else: blank line already cleared
         flush()
 
         key = read_key()
-        if key in ('j', 'down'):
-            if status_cursor < len(status_list) - 1:
-                status_cursor += 1
-        elif key in ('k', 'up'):
-            if status_cursor > 0:
-                status_cursor -= 1
-        elif key in ('g', 'home'):
+        if key == '_notify':
+            if g_resize_flag:
+                g_resize_flag = False
+                render_full()
+            continue
+        if key in ('down', 'ctrl-n'):
+            if visible:
+                status_cursor = (status_cursor + 1) % len(visible)
+        elif key in ('up', 'ctrl-p'):
+            if visible:
+                status_cursor = (status_cursor - 1) % len(visible)
+        elif key == 'home':
             status_cursor = 0
-        elif key in ('G', 'end'):
-            status_cursor = len(status_list) - 1
+        elif key == 'end':
+            if visible:
+                status_cursor = len(visible) - 1
         elif key == 'enter':
-            break
+            if visible:
+                break
         elif key in ('esc', 'ctrl-c'):
             needs_redraw = {'all'}
             return
+        elif key == 'backspace':
+            if filter_query:
+                filter_query = filter_query[:-1]
+                status_cursor = 0
+        elif len(key) == 1 and key.isprintable():
+            filter_query += key
+            status_cursor = 0
 
-    chosen = status_list[status_cursor]
+    chosen = visible[status_cursor]
 
     if chosen == 'custom...':
         chosen = _read_string('Status: ')
@@ -198,8 +253,10 @@ def action_edit(recursive=False):
     if t is None:
         return
     term_suspend()
-    plan_edit(t['id'], recursive=recursive)
+    rc = plan_edit(t['id'], recursive=recursive)
     term_resume()
+    if rc != 0:
+        _show_error('edit command failed (exit {})'.format(rc))
     reload()
 
 
@@ -207,8 +264,10 @@ def _do_create(relation, dest_id):
     """Insert-mode callback: create a ticket at the resolved position."""
     old_ids = {t['id'] for t in all_tickets}
     term_suspend()
-    plan_create(relation, dest_id)
+    rc = plan_create(relation, dest_id)
     term_resume()
+    if rc != 0:
+        _show_error('create command failed (exit {})'.format(rc))
     reload()
     for t in all_tickets:
         if t['id'] not in old_ids:
@@ -220,8 +279,10 @@ def _do_create_recursive(relation, dest_id):
     """Insert-mode callback: bulk create tickets at the resolved position."""
     old_ids = {t['id'] for t in all_tickets}
     term_suspend()
-    plan_create(relation, dest_id, recursive=True)
+    rc = plan_create(relation, dest_id, recursive=True)
     term_resume()
+    if rc != 0:
+        _show_error('create command failed (exit {})'.format(rc))
     reload()
     # Cursor to first new ticket
     for t in all_tickets:
@@ -290,11 +351,30 @@ def action_view(recursive=False):
 
     term_suspend()
     try:
-        plan_proc = subprocess.Popen(args, stdout=subprocess.PIPE)
-        pager_proc = subprocess.Popen(pager, stdin=plan_proc.stdout)
-        plan_proc.stdout.close()
-        pager_proc.wait()
+        plan_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        plan_stdout = plan_proc.stdout.read()
+        plan_stderr = plan_proc.stderr.read()
         plan_proc.wait()
+        # Log the plan command
+        _fake = subprocess.CompletedProcess(
+            args=args, returncode=plan_proc.returncode,
+            stdout=plan_stdout.decode('utf-8', errors='replace'),
+            stderr=plan_stderr.decode('utf-8', errors='replace'),
+        )
+        _log_command(args, _fake)
+        if plan_proc.returncode != 0:
+            term_resume()
+            _show_error(plan_stderr.decode('utf-8', errors='replace').strip()
+                        or 'view command failed')
+            return
+        # Feed output to pager
+        pager_proc = subprocess.Popen(pager, stdin=subprocess.PIPE)
+        try:
+            pager_proc.stdin.write(plan_stdout)
+            pager_proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        pager_proc.wait()
     except Exception:
         pass
     term_resume()
@@ -339,6 +419,25 @@ def action_move():
     insert_label = 'move'
     insert_callback = _do_move
     needs_redraw = {'all'}
+
+
+def action_command_log():
+    """Show command log in a pager."""
+    text = command_log_text()
+    pager = os.environ.get('PAGER', '') or 'less'
+    term_suspend()
+    try:
+        proc = subprocess.Popen([pager, '-R'], stdin=subprocess.PIPE)
+        try:
+            proc.stdin.write(text.encode('utf-8', errors='replace'))
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        proc.wait()
+    except Exception:
+        pass
+    term_resume()
+    reload()
 
 
 def action_help():

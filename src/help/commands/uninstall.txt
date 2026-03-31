@@ -1,9 +1,9 @@
-plan uninstall — Remove plan binary, Claude Code plugin, and CLAUDE.md section
+plan uninstall — Remove plan binary, plugin, and instruction sections
 
 Usage:
   plan uninstall local    Remove from current directory / project
   plan uninstall user     Remove from ~/.local/bin and ~/.claude
 
 Removes the binary, plugin directory, settings.json registration, and
-the task tracking section from CLAUDE.md. Empty files and directories
-are cleaned up.
+the task tracking section from CLAUDE.md and AGENTS.md. Empty files
+and directories are cleaned up.

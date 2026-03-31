@@ -3784,6 +3784,45 @@ class TestMoveCommand(unittest.TestCase):
         with self.assertRaises(SystemExit):
             plan._handle_move_verb(p, [p.lookup("2")], req)
 
+    def test_move_ticket_with_children(self):
+        """Moving a ticket with children should move the entire subtree
+        and update indent_level for all descendants."""
+        p = plan.parse(SAMPLE_DOC)
+        # Ticket #1 has child #3
+        t1 = p.lookup("1")
+        t3 = p.lookup("3")
+        t2 = p.lookup("2")
+        self.assertIn(t3, t1.children)
+        self.assertEqual(t1.indent_level, 0)
+        self.assertEqual(t3.indent_level, 2)
+
+        # Move #1 (with child #3) under #2
+        req = plan.ParsedRequest()
+        req.verb_args = ["last", "2"]
+        plan._handle_move_verb(p, [t1], req)
+
+        # #1 should now be a child of #2
+        self.assertEqual(t1.parent, t2)
+        self.assertIn(t1, t2.children)
+        self.assertNotIn(t1, p.tickets)
+        # #3 should still be a child of #1
+        self.assertIn(t3, t1.children)
+        self.assertEqual(t3.parent, t1)
+        # indent_level should be updated for entire subtree
+        self.assertEqual(t1.indent_level, 2)  # child of root-level #2
+        self.assertEqual(t3.indent_level, 4)  # grandchild
+
+        # Verify round-trip: serialize and re-parse
+        text = plan.serialize(p)
+        p2 = plan.parse(text)
+        t1b = p2.lookup("1")
+        t3b = p2.lookup("3")
+        t2b = p2.lookup("2")
+        self.assertIn(t1b, t2b.children)
+        self.assertIn(t3b, t1b.children)
+        self.assertEqual(t1b.indent_level, 2)
+        self.assertEqual(t3b.indent_level, 4)
+
 
 class TestCheckFix(unittest.TestCase):
     """Test check and fix commands."""
@@ -7231,6 +7270,127 @@ class TestInstallUninstall(unittest.TestCase):
         self.assertNotIn("Old instructions.", content)
         self.assertIn("plan create", content)
         self.assertEqual(content.count("## Task tracking"), 1)
+
+    # --- AGENTS.md (Codex) ---
+
+    def test_install_local_creates_agents_md(self):
+        """install local adds task tracking section to AGENTS.md."""
+        self._quiet(plan._handle_install, "local")
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        self.assertTrue(os.path.isfile(agents_md))
+        with open(agents_md) as f:
+            content = f.read()
+        self.assertIn("## Task tracking", content)
+        self.assertIn("plan create", content)
+        # Should NOT contain Claude-specific content
+        self.assertNotIn("TodoWrite", content)
+        self.assertNotIn("Load skills", content)
+
+    def test_install_local_appends_to_existing_agents_md(self):
+        """install local appends to existing AGENTS.md without overwriting."""
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        with open(agents_md, "w") as f:
+            f.write("# My Project\n\nExisting content.\n")
+        self._quiet(plan._handle_install, "local")
+        with open(agents_md) as f:
+            content = f.read()
+        self.assertIn("Existing content.", content)
+        self.assertIn("## Task tracking", content)
+
+    def test_install_local_replaces_existing_agents_md_section(self):
+        """install local replaces existing task tracking section in AGENTS.md."""
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        with open(agents_md, "w") as f:
+            f.write("## Task tracking\n\nOld content.\n")
+        self._quiet(plan._handle_install, "local")
+        with open(agents_md) as f:
+            content = f.read()
+        self.assertEqual(content.count("## Task tracking"), 1)
+        self.assertNotIn("Old content.", content)
+        self.assertIn("plan create", content)
+
+    def test_uninstall_local_removes_agents_md_section(self):
+        """uninstall local removes task tracking section from AGENTS.md."""
+        self._quiet(plan._handle_install, "local")
+        self._quiet(plan._handle_uninstall, "local")
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        # Should be deleted (was only our section)
+        self.assertFalse(os.path.isfile(agents_md))
+
+    def test_uninstall_local_preserves_other_agents_md_content(self):
+        """uninstall local keeps non-plan content in AGENTS.md."""
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        with open(agents_md, "w") as f:
+            f.write("# My Project\n\nKeep this.\n")
+        self._quiet(plan._handle_install, "local")
+        self._quiet(plan._handle_uninstall, "local")
+        with open(agents_md) as f:
+            content = f.read()
+        self.assertIn("Keep this.", content)
+        self.assertNotIn("## Task tracking", content)
+
+    def test_install_local_replaces_agents_md_section_preserves_other(self):
+        """install local replaces section but keeps other AGENTS.md content."""
+        agents_md = os.path.join(self.tmpdir, "AGENTS.md")
+        with open(agents_md, "w") as f:
+            f.write("# My Project\n\nKeep this.\n\n"
+                    "## Task tracking\n\nOld instructions.\n")
+        self._quiet(plan._handle_install, "local")
+        with open(agents_md) as f:
+            content = f.read()
+        self.assertIn("Keep this.", content)
+        self.assertNotIn("Old instructions.", content)
+        self.assertIn("plan create", content)
+        self.assertEqual(content.count("## Task tracking"), 1)
+
+    def test_install_user_creates_codex_instructions(self):
+        """install user creates ~/.codex/instructions.md."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+        codex_path = os.path.join(fake_home, ".codex", "instructions.md")
+        self.assertTrue(os.path.isfile(codex_path))
+        with open(codex_path) as f:
+            content = f.read()
+        self.assertIn("## Task tracking", content)
+        self.assertIn("plan create", content)
+
+    def test_uninstall_user_removes_codex_instructions(self):
+        """uninstall user removes section from ~/.codex/instructions.md."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        codex_path = os.path.join(fake_home, ".codex", "instructions.md")
+        # File and dir should be cleaned up (was only our section)
+        self.assertFalse(os.path.isfile(codex_path))
+        self.assertFalse(os.path.isdir(os.path.join(fake_home, ".codex")))
+
+    def test_uninstall_user_preserves_other_codex_content(self):
+        """uninstall user keeps non-plan content in ~/.codex/instructions.md."""
+        fake_home = os.path.join(self.tmpdir, "fakehome")
+        os.makedirs(os.path.join(fake_home, ".claude"), exist_ok=True)
+        with open(os.path.join(fake_home, ".claude", "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {}}, f)
+        codex_dir = os.path.join(fake_home, ".codex")
+        os.makedirs(codex_dir, exist_ok=True)
+        with open(os.path.join(codex_dir, "instructions.md"), "w") as f:
+            f.write("# My instructions\n\nKeep this.\n")
+        with unittest.mock.patch.dict(os.environ, {"HOME": fake_home}):
+            self._quiet(plan._handle_install, "user")
+            self._quiet(plan._handle_uninstall, "user")
+        codex_path = os.path.join(codex_dir, "instructions.md")
+        self.assertTrue(os.path.isfile(codex_path))
+        with open(codex_path) as f:
+            content = f.read()
+        self.assertIn("Keep this.", content)
+        self.assertNotIn("## Task tracking", content)
 
 
 class TestEditFlagParsing(unittest.TestCase):

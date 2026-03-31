@@ -44,8 +44,8 @@ except ImportError:
 # }}} # SOURCE END: 010-preambula.py
 
 # SOURCE START: 015-version+.sh {{{
-VERSION_A = [1, 0, 8]
-VERSION_STR = "1.0.8"
+VERSION_A = [1, 0, 9]
+VERSION_STR = "1.0.9"
 VERSION_DATE = "2026-03-25"
 # }}} # SOURCE END: 015-version+.sh
 
@@ -1579,6 +1579,15 @@ def sort_by_rank(tickets):
     return sorted(tickets, key=lambda t: (_get_rank(t), t.node_id or 0))
 
 
+def _update_descendant_indent(ticket):
+    """Recursively update indent_level of all descendants after reparenting."""
+    for child in ticket.children:
+        if isinstance(child, Ticket):
+            child.indent_level = ticket.indent_level + 2
+            child.dirty = True
+            _update_descendant_indent(child)
+
+
 def _reparent_ticket(ticket, new_parent, project):
     """Move ticket under new_parent (None for root). Handles detach + attach."""
     old_parent = ticket.parent if isinstance(ticket.parent, Ticket) else None
@@ -1601,6 +1610,7 @@ def _reparent_ticket(ticket, new_parent, project):
         ticket.indent_level = 0
         project.tickets.append(ticket)
     ticket.dirty = True
+    _update_descendant_indent(ticket)
 
 
 def _resolve_move_expr(value, ticket, project):
@@ -2692,21 +2702,24 @@ Examples:
 """,
 
     'install': """\
-plan install — Install plan binary, Claude Code plugin, and CLAUDE.md
+plan install — Install plan binary, Claude Code plugin, and instructions
 
 Usage:
   plan install local    Install into current directory / project
   plan install user     Install into ~/.local/bin and ~/.claude
 
 What gets installed:
-  Binary    'local': ./plan, 'user': ~/.local/bin/plan
-            Skipped if plan is already on PATH.
-  Plugin    'local': .claude/plugins/claude-plan/
-            'user': ~/.claude/plugins/claude-plan/
-            Registered in the corresponding settings.json.
-  CLAUDE.md 'local': ./CLAUDE.md
-            'user': ~/.claude/CLAUDE.md
-            Appends task tracking instructions. Skipped if already present.
+  Binary     'local': ./plan, 'user': ~/.local/bin/plan
+             Skipped if plan is already on PATH.
+  Plugin     'local': .claude/plugins/claude-plan/
+             'user': ~/.claude/plugins/claude-plan/
+             Registered in the corresponding settings.json.
+  CLAUDE.md  'local': ./CLAUDE.md
+             'user': ~/.claude/CLAUDE.md
+             Appends task tracking instructions. Skipped if already present.
+  AGENTS.md  'local': ./AGENTS.md (Codex)
+             'user': ~/.codex/instructions.md
+             Appends task tracking instructions. Skipped if already present.
 """,
 
     'link': """\
@@ -2932,15 +2945,15 @@ Examples:
 """,
 
     'uninstall': """\
-plan uninstall — Remove plan binary, Claude Code plugin, and CLAUDE.md section
+plan uninstall — Remove plan binary, plugin, and instruction sections
 
 Usage:
   plan uninstall local    Remove from current directory / project
   plan uninstall user     Remove from ~/.local/bin and ~/.claude
 
 Removes the binary, plugin directory, settings.json registration, and
-the task tracking section from CLAUDE.md. Empty files and directories
-are cleaned up.
+the task tracking section from CLAUDE.md and AGENTS.md. Empty files
+and directories are cleaned up.
 """,
 
     'unlink': """\
@@ -4918,6 +4931,7 @@ def _handle_move_verb(project, targets, req):
             if new_parent:
                 new_parent.dirty = True
 
+        _update_descendant_indent(source)
         prev = source
         source.set_attr("updated", _now())
         source.dirty = True
@@ -5458,7 +5472,7 @@ _PLUGIN_FILES = {
     '.claude-plugin/plugin.json': r'''{
   "name": "claude-plan",
   "description": "Integrate the plan CLI ticket tracker with Claude Code for structured planning and team coordination",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "license": "MIT",
   "keywords": ["planning", "tickets", "task-tracking", "team-coordination"]
 }
@@ -5528,6 +5542,10 @@ Dispatch subagents via the Agent tool to execute tickets from `.PLAN.md`. You ar
 
 - You have tickets in `.PLAN.md` and want subagents to execute them
 - Single leader dispatching workers via the Agent tool
+
+Getting tickets overview/list:
+- `plan N -r ls` gives structured view of subtasks.
+- `plan N -r ls order` gives subtasks in order of execution.
 
 ## Leader Role
 
@@ -5742,6 +5760,8 @@ plan N comment add "Feedback note"                        # Add feedback
 ```bash
 plan 'assignee == "my-name" and is_open' list                  # My work
 plan N status in-progress                                      # Start
+plan N -r ls                                                   # Structured view of subtasks
+plan N -r ls order                                             # Subtasks in execution order
 plan N comment add "Found issue, fixing"                       # Note
 plan N close                                                   # Done
 plan list ready                                                # What's next
@@ -5759,6 +5779,8 @@ Use the `plan` CLI to manage your assigned work:
 
 - Find your tasks: plan 'assignee == "YOUR-NAME" and is_open' list
 - View a task: plan N
+- Structured view of subtasks: plan N -r ls
+- Subtasks in execution order: plan N -r ls order
 - Start work: plan N status in-progress
 - Add notes: plan N comment add "Description of what you did or found"
 - Complete: plan N close
@@ -5809,6 +5831,8 @@ When dispatching subagents, you are the coordinator — do not implement tickets
 Include these instructions in the subagent prompt:
 - Find your tasks: `plan 'assignee == "YOUR-NAME" and is_open' list`
 - View a task: `plan N`
+- Structured view of subtasks: `plan N -r ls`
+- Subtasks in execution order: `plan N -r ls order`
 - Start work: `plan N status in-progress`
 - Add notes: `plan N comment add "Description of what you did"`
 - Complete: `plan N close`
@@ -5817,6 +5841,46 @@ Include these instructions in the subagent prompt:
 '''
 
 _CLAUDE_MD_MARKER = '## Task tracking'
+
+_CODEX_MD_SECTION = r'''
+## Task tracking
+
+Use the `plan` CLI for ALL task tracking.
+
+### Before starting work
+- Break the task into tickets: `plan create 'title="Step name"'`
+- For subtasks: `plan create PARENT 'title="Subtask"'`
+- Create tickets in preferred execution order (or reorder with `plan move`)
+- Put details in each subtask body (`plan N add "what to do"`), not as a TODO list in the parent
+- Review the breakdown: `plan list`
+
+### While working
+- Before starting a ticket: `plan N status in-progress`
+- After completing a ticket: `plan N close`
+- Add notes when useful: `plan N comment add "What happened"`
+- If new work surfaces: `plan create PARENT 'title="New task"'`
+- If a task is unnecessary: `plan N close wontfix`
+- Check what's next: `plan list ready` or `plan list order`
+
+### Reporting progress
+- Show status: `plan list --format 'f"{indent}#{id} [{status}] {title}"'`
+
+### For subagents / team workers
+When dispatching subagents, you are the coordinator — do not implement tickets yourself.
+
+Include these instructions in the subagent prompt:
+- Find your tasks: `plan 'assignee == "YOUR-NAME" and is_open' list`
+- View a task: `plan N`
+- Structured view of subtasks: `plan N -r ls`
+- Subtasks in execution order: `plan N -r ls order`
+- Start work: `plan N status in-progress`
+- Add notes: `plan N comment add "Description of what you did"`
+- Complete: `plan N close`
+- Check for more: `plan list ready` or `plan list order`
+- Create subtasks if needed: `plan create PARENT 'title="Subtask", assignee="YOUR-NAME"'`
+'''
+
+_CODEX_MD_MARKER = '## Task tracking'
 
 
 # }}} # SOURCE END: 160-install-files+.py
@@ -5859,24 +5923,24 @@ def _get_plugin_version():
         return "1.0.0"
 
 
-def _remove_claude_md_section(content):
-    """Remove the task tracking section from CLAUDE.md content.
+def _remove_md_section(content, marker):
+    """Remove a marker-delimited section from markdown content.
 
     Returns the remaining content (may be empty string).
     """
-    if _CLAUDE_MD_MARKER not in content:
+    if marker not in content:
         return content
-    idx = content.index(_CLAUDE_MD_MARKER)
+    idx = content.index(marker)
     # Trim preceding newlines
     while idx > 0 and content[idx - 1] == "\n":
         idx -= 1
     before = content[:idx]
-    after_section = content[content.index(_CLAUDE_MD_MARKER):]
+    after_section = content[content.index(marker):]
     # Find end of our section: next ## heading or end of file
     lines = after_section.split("\n")
     end = len(lines)
     for i, line in enumerate(lines):
-        if i > 0 and line.startswith("## ") and line != _CLAUDE_MD_MARKER:
+        if i > 0 and line.startswith("## ") and line != marker:
             end = i
             break
     remaining = "\n".join(lines[end:])
@@ -5887,6 +5951,10 @@ def _remove_claude_md_section(content):
     if result.strip():
         return result + "\n"
     return ""
+
+
+def _remove_claude_md_section(content):
+    return _remove_md_section(content, _CLAUDE_MD_MARKER)
 
 
 def _handle_install(scope):
@@ -6000,6 +6068,32 @@ def _handle_install(scope):
         with open(claude_md_path, "a") as f:
             f.write(_CLAUDE_MD_SECTION)
         print(f"CLAUDE.md: updated {claude_md_path}")
+
+    # --- AGENTS.md (Codex) ---
+    if scope == "local":
+        agents_md_path = os.path.join(os.getcwd(), "AGENTS.md")
+    else:
+        agents_md_path = os.path.expanduser("~/.codex/instructions.md")
+
+    existing = ""
+    if os.path.exists(agents_md_path):
+        with open(agents_md_path) as f:
+            existing = f.read()
+
+    if _CODEX_MD_MARKER in existing:
+        new_content = _remove_md_section(existing, _CODEX_MD_MARKER)
+        if new_content.strip():
+            with open(agents_md_path, "w") as f:
+                f.write(new_content + _CODEX_MD_SECTION)
+        else:
+            with open(agents_md_path, "w") as f:
+                f.write(_CODEX_MD_SECTION)
+        print(f"AGENTS.md: replaced section in {agents_md_path}")
+    else:
+        os.makedirs(os.path.dirname(agents_md_path) or ".", exist_ok=True)
+        with open(agents_md_path, "a") as f:
+            f.write(_CODEX_MD_SECTION)
+        print(f"AGENTS.md: updated {agents_md_path}")
 
     print("Done.")
 
@@ -6152,6 +6246,35 @@ def _handle_uninstall(scope):
             print(f"CLAUDE.md: no task tracking section found")
     else:
         print(f"CLAUDE.md: not found at {claude_md_path}")
+
+    # --- AGENTS.md (Codex) ---
+    if scope == "local":
+        agents_md_path = os.path.join(os.getcwd(), "AGENTS.md")
+    else:
+        agents_md_path = os.path.expanduser("~/.codex/instructions.md")
+
+    if os.path.exists(agents_md_path):
+        with open(agents_md_path) as f:
+            content = f.read()
+
+        if _CODEX_MD_MARKER in content:
+            new_content = _remove_md_section(content, _CODEX_MD_MARKER)
+            if new_content.strip():
+                with open(agents_md_path, "w") as f:
+                    f.write(new_content)
+                print(f"AGENTS.md: removed task tracking section from {agents_md_path}")
+            else:
+                os.remove(agents_md_path)
+                # Clean up empty parent dir for user scope
+                if scope == "user":
+                    parent = os.path.dirname(agents_md_path)
+                    if os.path.isdir(parent) and not os.listdir(parent):
+                        os.rmdir(parent)
+                print(f"AGENTS.md: removed {agents_md_path} (was empty)")
+        else:
+            print(f"AGENTS.md: no task tracking section found")
+    else:
+        print(f"AGENTS.md: not found at {agents_md_path}")
 
 # }}} # SOURCE END: 170-install.py
 

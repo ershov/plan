@@ -632,22 +632,16 @@ def _handle_normal_key(key):
     elif key == 's':
         action_status()
 
-    elif key == 'c':
-        action_close()
-
-    elif key == 'o':
-        action_reopen()
-
     elif key == 'e':
         action_edit()
 
     elif key == 'E':
         action_edit(recursive=True)
 
-    elif key == 'n':
+    elif key == 'c':
         action_create()
 
-    elif key == 'N':
+    elif key == 'C':
         action_create_recursive()
 
     elif key == 'm':
@@ -658,6 +652,9 @@ def _handle_normal_key(key):
 
     elif key == 'V':
         action_view(recursive=True)
+
+    elif key == '~':
+        action_command_log()
 
     elif key in ('?', 'f1'):
         action_help()
@@ -678,9 +675,14 @@ def _handle_normal_key(key):
             return 'quit'
 
     elif key == 'ctrl-l':
+        # Reset terminal and redraw without reloading data
+        write('\033[!p')  # soft terminal reset (DECSTR)
+        _enter_raw()
+        needs_redraw = {'all'}
+
+    elif key == 'ctrl-r':
         cache_invalidate()
         reload()
-        needs_redraw = {'all'}
 
     return None
 
@@ -691,6 +693,8 @@ def main(initial_scope):
 
     scope = initial_scope
     reload()
+    if _last_list_error:
+        sys.exit(_last_list_error)
     render_full()
 
     while True:

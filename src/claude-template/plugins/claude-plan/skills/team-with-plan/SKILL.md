@@ -35,6 +35,8 @@ plan N comment add "Feedback note"                        # Add feedback
 ```bash
 plan 'assignee == "my-name" and is_open' list                  # My work
 plan N status in-progress                                      # Start
+plan N -r ls                                                   # Structured view of subtasks
+plan N -r ls order                                             # Subtasks in execution order
 plan N comment add "Found issue, fixing"                       # Note
 plan N close                                                   # Done
 plan list ready                                                # What's next
@@ -52,6 +54,8 @@ Use the `plan` CLI to manage your assigned work:
 
 - Find your tasks: plan 'assignee == "YOUR-NAME" and is_open' list
 - View a task: plan N
+- Structured view of subtasks: plan N -r ls
+- Subtasks in execution order: plan N -r ls order
 - Start work: plan N status in-progress
 - Add notes: plan N comment add "Description of what you did or found"
 - Complete: plan N close

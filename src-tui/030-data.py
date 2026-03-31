@@ -2,7 +2,43 @@
 # Data Layer — all plan interaction through subprocess calls
 ##############################################################################
 
+import time as _time
+
 _cache = {}
+_command_log = []  # list of (timestamp, cmd_str, stdout, stderr, returncode) tuples
+_COMMAND_LOG_MAX = 50
+
+
+_CYAN = '\033[36m'
+_RED = '\033[31m'
+_RESET = '\033[0m'
+
+
+def command_log_text():
+    """Return the command log as a single string with ANSI colors."""
+    if not _command_log:
+        return '(no commands logged yet)\n'
+    parts = []
+    for ts, cmd, out, err, rc in _command_log:
+        parts.append('')
+        t = _time.strftime('%H:%M:%S', _time.localtime(ts))
+        if rc != 0:
+            parts.append(f'{_CYAN}[{t}] $ {cmd}  [exit {rc}]{_RESET}')
+        else:
+            parts.append(f'{_CYAN}[{t}] $ {cmd}{_RESET}')
+        if out:
+            parts.append(out)
+        if err:
+            parts.append(f'{_RED}{err}{_RESET}')
+    return '\n'.join(parts) + '\n'
+
+
+def _log_command(args, result):
+    """Append a completed command to the log."""
+    cmd_str = ' '.join(args)
+    _command_log.append((_time.time(), cmd_str, result.stdout or '', result.stderr or '', result.returncode))
+    if len(_command_log) > _COMMAND_LOG_MAX:
+        del _command_log[:len(_command_log) - _COMMAND_LOG_MAX]
 
 
 def cache_invalidate():
@@ -20,9 +56,10 @@ def cache_invalidate_ticket(ticket_id):
 
 def _run_plan(*args):
     """Run plan command with captured output. Returns CompletedProcess."""
+    full_args = [PLAN_BIN] + list(args)
     try:
-        return subprocess.run(
-            [PLAN_BIN] + list(args),
+        result = subprocess.run(
+            full_args,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -30,12 +67,14 @@ def _run_plan(*args):
         )
     except Exception:
         # Return a fake CompletedProcess on failure (timeout, missing binary, etc.)
-        return subprocess.CompletedProcess(
-            args=[PLAN_BIN] + list(args),
+        result = subprocess.CompletedProcess(
+            args=full_args,
             returncode=1,
             stdout='',
             stderr='',
         )
+    _log_command(full_args, result)
+    return result
 
 
 def _parse_ticket_line(line):
@@ -55,12 +94,16 @@ def _parse_ticket_line(line):
 
 _LIST_FORMAT = 'f"{id}\\t{parent}\\t{status}\\t{1 if children() else 0}\\t{depth}\\t{title}"'
 
+_last_list_error = ''
+
 
 def plan_list(scope):
     """Get all tickets. Returns list of dicts.
 
     scope=None for root, scope=ticket_id to list descendants of that ticket.
     """
+    global _last_list_error
+
     if 'list' in _cache and _cache.get('list_scope') == scope:
         return _cache['list']
 
@@ -75,7 +118,10 @@ def plan_list(scope):
         )
 
     if result.returncode != 0:
+        _last_list_error = result.stderr.strip() or 'plan command failed'
         return []
+
+    _last_list_error = ''
 
     tickets = []
     for line in result.stdout.splitlines():
@@ -92,10 +138,10 @@ def plan_list(scope):
 
 
 def plan_get(ticket_id):
-    """Get ticket details. Returns raw text string."""
+    """Get ticket details. Returns (text, error) tuple."""
     hit = _cache.get('preview', {}).get(ticket_id)
     if hit is not None:
-        return hit
+        return hit, ''
 
     if ticket_id == 0:
         result = _run_plan('project', 'get')
@@ -103,18 +149,18 @@ def plan_get(ticket_id):
         result = _run_plan(str(ticket_id), 'get')
 
     if result.returncode != 0:
-        return ''
+        return '', result.stderr.strip() or 'get command failed'
 
     text = result.stdout
     _cache.setdefault('preview', {})[ticket_id] = text
-    return text
+    return text, ''
 
 
 def plan_children(ticket_id):
-    """Get direct children of a ticket. Returns list of dicts."""
+    """Get direct children of a ticket. Returns (list_of_dicts, error) tuple."""
     hit = _cache.get('children', {}).get(ticket_id)
     if hit is not None:
-        return hit
+        return hit, ''
 
     result = _run_plan(
         str(ticket_id), '-r',
@@ -124,7 +170,7 @@ def plan_children(ticket_id):
 
     if result.returncode != 0:
         _cache.setdefault('children', {})[ticket_id] = []
-        return []
+        return [], result.stderr.strip() or 'list children failed'
 
     lines = result.stdout.splitlines()
     # Skip the first result (the ticket itself)
@@ -147,7 +193,7 @@ def plan_children(ticket_id):
             children.append(ticket)
 
     _cache.setdefault('children', {})[ticket_id] = children
-    return children
+    return children, ''
 
 
 def plan_status(ids, status):
@@ -200,6 +246,7 @@ def plan_edit(ticket_id, recursive=False):
             else:
                 args = [PLAN_BIN, 'edit', '-r', str(ticket_id)]
         result = subprocess.run(args)
+        _log_command(args, result)
         return result.returncode
     except Exception:
         return 1
@@ -217,6 +264,7 @@ def plan_create(mode, cursor_id, recursive=False):
             args.append('-r')
         args.append('title="New ticket", move="{} {}"'.format(mode, cursor_id))
         result = subprocess.run(args)
+        _log_command(args, result)
         return result.returncode
     except Exception:
         return 1

@@ -35,24 +35,24 @@ def _get_plugin_version():
         return "1.0.0"
 
 
-def _remove_claude_md_section(content):
-    """Remove the task tracking section from CLAUDE.md content.
+def _remove_md_section(content, marker):
+    """Remove a marker-delimited section from markdown content.
 
     Returns the remaining content (may be empty string).
     """
-    if _CLAUDE_MD_MARKER not in content:
+    if marker not in content:
         return content
-    idx = content.index(_CLAUDE_MD_MARKER)
+    idx = content.index(marker)
     # Trim preceding newlines
     while idx > 0 and content[idx - 1] == "\n":
         idx -= 1
     before = content[:idx]
-    after_section = content[content.index(_CLAUDE_MD_MARKER):]
+    after_section = content[content.index(marker):]
     # Find end of our section: next ## heading or end of file
     lines = after_section.split("\n")
     end = len(lines)
     for i, line in enumerate(lines):
-        if i > 0 and line.startswith("## ") and line != _CLAUDE_MD_MARKER:
+        if i > 0 and line.startswith("## ") and line != marker:
             end = i
             break
     remaining = "\n".join(lines[end:])
@@ -63,6 +63,10 @@ def _remove_claude_md_section(content):
     if result.strip():
         return result + "\n"
     return ""
+
+
+def _remove_claude_md_section(content):
+    return _remove_md_section(content, _CLAUDE_MD_MARKER)
 
 
 def _handle_install(scope):
@@ -176,6 +180,32 @@ def _handle_install(scope):
         with open(claude_md_path, "a") as f:
             f.write(_CLAUDE_MD_SECTION)
         print(f"CLAUDE.md: updated {claude_md_path}")
+
+    # --- AGENTS.md (Codex) ---
+    if scope == "local":
+        agents_md_path = os.path.join(os.getcwd(), "AGENTS.md")
+    else:
+        agents_md_path = os.path.expanduser("~/.codex/instructions.md")
+
+    existing = ""
+    if os.path.exists(agents_md_path):
+        with open(agents_md_path) as f:
+            existing = f.read()
+
+    if _CODEX_MD_MARKER in existing:
+        new_content = _remove_md_section(existing, _CODEX_MD_MARKER)
+        if new_content.strip():
+            with open(agents_md_path, "w") as f:
+                f.write(new_content + _CODEX_MD_SECTION)
+        else:
+            with open(agents_md_path, "w") as f:
+                f.write(_CODEX_MD_SECTION)
+        print(f"AGENTS.md: replaced section in {agents_md_path}")
+    else:
+        os.makedirs(os.path.dirname(agents_md_path) or ".", exist_ok=True)
+        with open(agents_md_path, "a") as f:
+            f.write(_CODEX_MD_SECTION)
+        print(f"AGENTS.md: updated {agents_md_path}")
 
     print("Done.")
 
@@ -328,4 +358,33 @@ def _handle_uninstall(scope):
             print(f"CLAUDE.md: no task tracking section found")
     else:
         print(f"CLAUDE.md: not found at {claude_md_path}")
+
+    # --- AGENTS.md (Codex) ---
+    if scope == "local":
+        agents_md_path = os.path.join(os.getcwd(), "AGENTS.md")
+    else:
+        agents_md_path = os.path.expanduser("~/.codex/instructions.md")
+
+    if os.path.exists(agents_md_path):
+        with open(agents_md_path) as f:
+            content = f.read()
+
+        if _CODEX_MD_MARKER in content:
+            new_content = _remove_md_section(content, _CODEX_MD_MARKER)
+            if new_content.strip():
+                with open(agents_md_path, "w") as f:
+                    f.write(new_content)
+                print(f"AGENTS.md: removed task tracking section from {agents_md_path}")
+            else:
+                os.remove(agents_md_path)
+                # Clean up empty parent dir for user scope
+                if scope == "user":
+                    parent = os.path.dirname(agents_md_path)
+                    if os.path.isdir(parent) and not os.listdir(parent):
+                        os.rmdir(parent)
+                print(f"AGENTS.md: removed {agents_md_path} (was empty)")
+        else:
+            print(f"AGENTS.md: no task tracking section found")
+    else:
+        print(f"AGENTS.md: not found at {agents_md_path}")
 

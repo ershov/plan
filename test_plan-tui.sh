@@ -64,7 +64,8 @@ assert_contains "scoped plan_list shows child" 'Beta child' "$OUT"
 OUT=$(python3 -c "
 import sys; sys.path.insert(0, '.')
 exec(open('$SELF').read().split(\"if __name__\")[0])
-print(plan_get(1))
+text, err = plan_get(1)
+print(text)
 ")
 assert_contains "plan_get shows Alpha" 'Alpha' "$OUT"
 
@@ -72,7 +73,8 @@ assert_contains "plan_get shows Alpha" 'Alpha' "$OUT"
 OUT=$(python3 -c "
 import sys; sys.path.insert(0, '.')
 exec(open('$SELF').read().split(\"if __name__\")[0])
-print(plan_get(0))
+text, err = plan_get(0)
+print(text)
 ")
 # Should not error (project get returns something)
 assert_eq "plan_get project does not fail" "0" "$?"
@@ -81,7 +83,7 @@ assert_eq "plan_get project does not fail" "0" "$?"
 OUT=$(python3 -c "
 import sys; sys.path.insert(0, '.')
 exec(open('$SELF').read().split(\"if __name__\")[0])
-children = plan_children(2)
+children, err = plan_children(2)
 for c in children:
     print('{id}\t{title}'.format(**c))
 ")
