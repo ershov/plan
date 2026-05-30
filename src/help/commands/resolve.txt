@@ -1,7 +1,28 @@
-plan resolve — Resolve merge conflicts
+plan resolve — Recover a plan file with raw git conflict markers
 
 Usage:
   plan resolve
 
-Parses git merge conflict markers in the plan file and attempts
-to produce a clean merged document.
+Best-effort recovery for a plan file that already contains raw git
+conflict markers ('<<<<<<<', '=======', '>>>>>>>') — i.e. a merge done
+WITHOUT the git merge driver. It reconstructs both sides from the
+markers and runs a structure-aware merge (three-way if diff3 '|||||||'
+base markers are present, otherwise a lossier two-way merge that cannot
+distinguish add from delete).
+
+The file is cleaned (markers removed) and the auto-merged result is
+written; unresolved conflicts default to your ('to') side. If genuine
+conflicts remain, a '<planfile>.reject' is written so you can finish
+per-field with 'plan merge --resolve' (or 'plan merge --abort').
+
+This is the degraded cousin of 'plan merge' and is lossier. Prefer
+'plan merge <branch>', or install the git merge driver with
+'plan install local' so merges reconcile automatically.
+
+Exit codes:
+  0   no markers found, or markers reconciled cleanly
+  1   reconciled, but field conflicts remain (.reject written; finish
+      with 'plan merge --resolve')
+  2   a merge is already in progress, or a hard error
+
+See 'plan help merge' for the primary structure-aware merge command.

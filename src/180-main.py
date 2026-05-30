@@ -22,14 +22,30 @@ def main(argv=None):
     # Handle install/uninstall before parsing (no plan file needed)
     if argv[0] == "install":
         if len(argv) < 2:
-            raise SystemExit("Error: install requires 'local' or 'user' argument")
+            raise SystemExit(
+                "Error: install requires 'local', 'user', or 'git' argument")
         _handle_install(argv[1])
         return
     if argv[0] == "uninstall":
         if len(argv) < 2:
-            raise SystemExit("Error: uninstall requires 'local' or 'user' argument")
+            raise SystemExit(
+                "Error: uninstall requires 'local', 'user', or 'git' argument")
         _handle_uninstall(argv[1])
         return
+
+    # Git merge driver entry: `plan merge-driver %O %A %B %P`. Intercepted early
+    # because git passes raw positional temp files (not the normal grammar), and
+    # the driver needs git + raw text. It writes %A itself and returns an exit
+    # code (0 = clean, non-zero = conflict; git then records the path unmerged).
+    if argv[0] == "merge-driver":
+        positional = argv[1:]
+        if len(positional) != 4:
+            raise SystemExit(
+                "Error: merge-driver requires exactly 4 arguments: "
+                "<base> <ours> <theirs> <path>")
+        rc = _handle_merge_driver(positional[0], positional[1],
+                                  positional[2], positional[3])
+        sys.exit(rc)
 
     # Parse requests
     requests = parse_argv(argv)
@@ -48,6 +64,21 @@ def main(argv=None):
             for line in output:
                 print(line)
             return
+
+    # Merge: intercepted BEFORE main's discover_file/flock block. Stage 9 made
+    # merge work on explicit --to/--from/--base sources and `-o OUT`, possibly
+    # entirely outside a git repo and without a discoverable .PLAN.md, so it
+    # can't use main's single-file flock. The handler does its own source
+    # resolution + output discovery and takes its OWN exclusive lock on the
+    # output file for the read->merge->write (see _OutputLock in 145). It
+    # returns an exit code (0/1/2); status to stdout, errors to stderr.
+    for req in requests:
+        if req.command is not None and req.command[0] == "merge":
+            output = []
+            rc = _handle_merge(req, flags, output)
+            for line in output:
+                print(line)
+            sys.exit(rc)
 
     # Discover file
     filepath = discover_file(flags)
@@ -99,18 +130,17 @@ def main(argv=None):
         else:
             text = open(filepath).read()
 
-        # Check for resolve command (works on raw text, not parsed)
+        # Check for resolve command (works on raw text, not parsed). The new
+        # resolve is the two-way structural cousin of merge: it reconstructs the
+        # sides from raw git conflict markers, runs the engine, writes the plan
+        # file itself, and returns an exit code (0/1/2). Status to stdout.
         for req in requests:
             if req.command is not None and req.command[0] == "resolve":
                 output = []
-                result_text = _handle_resolve(None, output, filepath=filepath,
-                                               raw_text=text)
+                rc = _handle_resolve(filepath, text, output)
                 for line in output:
                     print(line)
-                if result_text is not None:
-                    with open(filepath, "w") as f:
-                        f.write(result_text)
-                return
+                sys.exit(rc)
 
         # Parse document
         project = parse(text)

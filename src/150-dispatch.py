@@ -157,6 +157,8 @@ def dispatch(project, req, output):
             return True
         if cmd_name == "resolve":
             return "resolve"
+        if cmd_name == "merge":
+            return "merge"
         return modified
 
     # Branch 2: Selector + Verb dispatch

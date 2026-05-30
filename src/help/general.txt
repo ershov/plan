@@ -14,9 +14,11 @@ Commands (must be the first word):
   edit ID [-r]      Edit ticket in $EDITOR (-r includes children)
   check             Validate document
   fix               Auto-repair document
-  resolve           Resolve merge conflicts
-  install local|user  Install binary, Claude Code plugin, and CLAUDE.md
-  uninstall local|user  Remove binary, plugin, and CLAUDE.md section
+  merge <branch>    Structure-aware three-way merge of the plan file
+                    (--resolve | --abort | --check; see 'help merge')
+  resolve           Recover a file with raw git conflict markers
+  install local|user|git  Install binary/plugin/CLAUDE.md ('git' = merge driver only)
+  uninstall local|user|git  Remove binary, plugin, CLAUDE.md ('git' = merge driver only)
   help [TOPIC]      Show help on command/verb/selector
   help dsl          Help on DSL for selectors, filters, expressions
 

@@ -712,7 +712,9 @@ def op_resolve(rng, st):
         'printf "%s\\n%s\\n" "$PLAN_CONTENT" "$CONFLICT_BLOCK" > "$PLAN_FILE"'
     )
 
-    return ("resolve", "resolve", "raw", bash_lines)
+    # 5th element names the bash runner: resolve uses run_resolve (exit 0 OR 1
+    # are both success; it always cleans up any .reject state afterwards).
+    return ("resolve", "resolve", "raw", bash_lines, "run_resolve")
 
 
 def op_project_del(rng, st):
@@ -955,6 +957,36 @@ run_plan() {{
     fi
 }}
 
+# `plan resolve` is the two-way structural recovery cousin of merge: it cleans
+# the conflict markers (always producing a valid file) and returns 0 when it
+# reconciled cleanly or 1 when field conflicts remained (it then writes a
+# .reject for `plan merge --resolve`). BOTH are success here. A crash/traceback
+# or exit 2 (hard error) is a real failure. We always clear any leftover
+# .reject + snapshot state afterwards so it can't leak into later ops.
+run_resolve() {{
+    local desc="$1"
+    shift
+    local stderr_file="$TMPDIR_BASE/stderr.tmp"
+    local rc=0
+    # `|| rc=$?` keeps `set -e` from aborting on resolve's expected exit 1.
+    python3 "$PLAN_PY" "$@" > /dev/null 2>"$stderr_file" || rc=$?
+    local stderr_content
+    stderr_content=$(cat "$stderr_file")
+    if echo "$stderr_content" | grep -q "^Traceback\|^  File "; then
+        FAIL=$((FAIL + 1))
+        ERRORS="${{ERRORS}}CRASH [op ${{PASS}}+${{FAIL}}+${{WARN}}]: ${{desc}}\n  exit=${{rc}} stderr: ${{stderr_content}}\n"
+    elif [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${{ERRORS}}FAIL [op ${{PASS}}+${{FAIL}}+${{WARN}}]: ${{desc}}\n  exit=${{rc}} stderr: ${{stderr_content}}\n"
+    fi
+    # Clear any in-progress merge state the conflict path may have written, so
+    # subsequent ops (and the final `check`) see a clean working tree.
+    rm -f "$PLAN_FILE.reject"
+    rm -rf "$(dirname "$PLAN_FILE")/.git/plan-merge"
+}}
+
 '''
 
 BASH_FOOTER = r'''echo "========================="
@@ -1019,12 +1051,13 @@ def main():
         desc = entry[0]
         cmd = entry[1]
         if len(entry) >= 3 and entry[2] == "raw":
-            # Raw bash block: (desc, cmd, "raw", bash_lines)
+            # Raw bash block: (desc, cmd, "raw", bash_lines[, runner])
             bash_lines = entry[3]
+            runner = entry[4] if len(entry) >= 5 else "run_plan"
             print(f"# Op {idx}: {desc}")
             for line in bash_lines:
                 print(line)
-            print(f'run_plan "{idx}:{desc}" {cmd}')
+            print(f'{runner} "{idx}:{desc}" {cmd}')
         elif len(entry) == 4:
             # Edit operation: (desc, cmd, mode, text)
             mode = entry[2]

@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 
 COMMANDS = {"create", "edit",
-            "check", "fix", "resolve", "help", "h"}
+            "check", "fix", "resolve", "merge", "help", "h"}
 SELECTORS = {"comment", "attr", "project", "id"}  # bare ints detected by isdigit()
 VERBS = {"get", "list", "ls", "replace", "add", "+", "del", "mod", "~",
          "link", "unlink", "next", "status", "close", "reopen", "move"}
@@ -373,6 +373,9 @@ def _parse_command(argv, i, n, req):
     elif cmd in ("check", "fix", "resolve"):
         req.command = (cmd, [])
 
+    elif cmd == "merge":
+        return _parse_merge(argv, i, n, req)
+
     else:
         # create, edit: consume all remaining non-flag tokens
         while i < n:
@@ -387,6 +390,105 @@ def _parse_command(argv, i, n, req):
     # -h flag converts to help about this command
     if req.flags.get("help") and req.command[0] not in ("help", "h"):
         req.command = ("help", [req.command[0]])
+
+    return req
+
+
+_MERGE_ENUM_FLAGS = {"--prefer": "prefer", "--renumber": "renumber"}
+# Value flags taking an arbitrary string argument (source specs / output path).
+_MERGE_VALUE_FLAGS = {
+    "--to": "merge_to",
+    "--from": "merge_from",
+    "--base": "merge_base",
+    "-o": "merge_output",
+    "--output": "merge_output",
+}
+_MERGE_BOOL_FLAGS = {
+    "--resolve": "merge_resolve",
+    "--abort": "abort",
+    "--check": "merge_check",
+    "--stage": "stage",
+    "--no-stage": "no_stage",
+    "--no-edit": "no_edit",
+}
+
+
+def _parse_merge(argv, i, n, req):
+    """Parse the `merge` command: an OPTIONAL <branch> plus merge-specific flags.
+
+    Grammar:
+        plan merge [<branch>] [--to SRC] [--from SRC] [--base SRC] [-o|--output OUT]
+                   [--renumber to|from] [--prefer to|from]
+                   [--stage|--no-stage] [--no-edit] [--check]
+        plan merge --resolve [-o OUT]
+        plan merge --abort   [-o OUT]
+
+    A positional <branch> is shorthand for `--from <branch>`; supplying both a
+    positional branch and an explicit --from is an error. Sources/output land in
+    req.flags as merge_to/merge_from/merge_base/merge_output; req.command holds
+    the positional branch (or nothing). The merge-specific flags are recognized
+    only inside this parser so they cannot leak into the general flag set used by
+    other commands.
+    """
+    branch = None
+    while i < n:
+        arg = argv[i]
+        # Generic flags shared with other commands (e.g. -h/--help) still apply.
+        # NOTE: the global _parse_flag also recognizes --abort (used by edit);
+        # we let it set req.flags["abort"] which _handle_merge reads.
+        new_i = _parse_flag(argv, i, n, req)
+        if new_i is not None:
+            i = new_i
+            continue
+        # Value flags: --to / --from / --base / -o|--output take a string arg.
+        if arg in _MERGE_VALUE_FLAGS:
+            if i + 1 >= n:
+                raise SystemExit("Error: %s requires a value" % arg)
+            req.flags[_MERGE_VALUE_FLAGS[arg]] = argv[i + 1]
+            i += 2
+            continue
+        # Enum flags: --prefer / --renumber take a validated to|from value.
+        if arg in _MERGE_ENUM_FLAGS:
+            if i + 1 >= n:
+                raise SystemExit("Error: %s requires a value (to|from)" % arg)
+            val = argv[i + 1]
+            if val not in ("to", "from"):
+                raise SystemExit(
+                    "Error: %s must be 'to' or 'from', got %r" % (arg, val))
+            req.flags[_MERGE_ENUM_FLAGS[arg]] = val
+            i += 2
+            continue
+        # Boolean merge flags.
+        if arg in _MERGE_BOOL_FLAGS:
+            req.flags[_MERGE_BOOL_FLAGS[arg]] = True
+            i += 1
+            continue
+        if arg.startswith("-"):
+            raise SystemExit("Error: unknown flag for merge: %s" % arg)
+        # First bare token is the branch (shorthand for --from); a second errors.
+        if branch is not None:
+            raise SystemExit(
+                "Error: merge takes at most one branch, got extra %r" % arg)
+        branch = arg
+        i += 1
+
+    # A positional branch is shorthand for --from. We record whether BOTH a
+    # positional and an explicit --from were supplied so the handler can reject
+    # that with the merge exit code (2) rather than a generic parse error (1).
+    if branch is not None:
+        if "merge_from" in req.flags:
+            req.flags["merge_both_from"] = True
+        else:
+            req.flags["merge_from"] = branch
+
+    # Keep the positional in req.command for back-compat. An empty list means
+    # "no positional branch given".
+    cmd_args = [branch] if branch is not None else []
+    req.command = ("merge", cmd_args)
+
+    # -h flag converts to help about the merge command.
+    if req.flags.get("help"):
+        req.command = ("help", ["merge"])
 
     return req
 

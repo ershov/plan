@@ -384,10 +384,33 @@ plan check
 
 # Auto-fix issues
 plan fix
+```
 
-# Resolve merge conflicts
+## Merging Branches
+
+```bash
+# Structure-aware merge of another branch's plan file
+plan merge main
+
+# Dry run: report the conflict count without writing
+plan merge main --check
+
+# Take one side on every conflict (no .reject)
+plan merge main --prefer to
+
+# Finish a merge after editing .PLAN.md.reject
+plan merge --resolve
+
+# Or discard an in-progress merge
+plan merge --abort
+
+# Recover a file that already has raw git conflict markers
 plan resolve
 ```
+
+With the git merge driver installed (`plan install local`), `git merge`
+and `git rebase` reconcile `.PLAN.md` automatically; on conflict finish
+with `plan merge --resolve` then `git add .PLAN.md`.
 
 ## Environment and File Selection
 

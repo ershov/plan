@@ -18,9 +18,10 @@ with no interactive prompts, no editor, and no TTY required.
 8. [Querying and Filtering](#querying-and-filtering)
 9. [Bulk Operations](#bulk-operations)
 10. [Multi-Agent Coordination](#multi-agent-coordination)
-11. [Piping and Stdin Patterns](#piping-and-stdin-patterns)
-12. [Error Handling](#error-handling)
-13. [Recipes](#recipes)
+11. [Merging Branches](#merging-branches)
+12. [Piping and Stdin Patterns](#piping-and-stdin-patterns)
+13. [Error Handling](#error-handling)
+14. [Recipes](#recipes)
 
 ---
 
@@ -628,6 +629,54 @@ plan project role:executor
 plan 'assignee == "" or assignee == "executor"' list ready
 plan 'assignee == "" or assignee == "executor"' list order
 ```
+
+---
+
+## Merging Branches
+
+`.PLAN.md` is a single file, so two branches that both change it must be
+reconciled. `plan merge` does this structurally — per ticket/comment, by
+ID — which a line-based merge cannot. Always pass `--no-edit` from an
+agent so it never tries to launch `$EDITOR`.
+
+```bash
+# Dry run: report the conflict count, write nothing (exit 1 if conflicts)
+plan merge main --check
+
+# Structure-aware three-way merge into the working tree
+plan merge main --no-edit
+```
+
+A clean merge exits 0. On conflicts it writes the auto-merged result
+(your/`to` side kept, so the file stays valid) plus `.PLAN.md.reject`,
+and exits non-zero (1).
+
+To resolve non-interactively, either take one side everywhere:
+
+```bash
+plan merge main --prefer to --no-edit    # keep your side on every conflict
+plan merge main --prefer from --no-edit  # take the incoming side everywhere
+```
+
+…or edit `.PLAN.md.reject` and apply it. Each block has
+`--- to (<branch>) ---` and `--- from (<branch>) ---` segments; keep
+exactly one side (delete the other, or delete a side's indicator line and
+leave only its content). Do NOT edit the content — only choose a side. A
+side whose content is `<DELETED>` removes the entry. Then:
+
+```bash
+plan merge --resolve     # apply the edited .reject and finish (exit 0)
+plan merge --abort       # or discard the in-progress merge
+```
+
+If the git merge driver is installed (`plan install local`), a plain
+`git merge` / `git rebase` reconciles `.PLAN.md` automatically; on
+conflict it leaves a `.reject` — finish with `plan merge --resolve` then
+`git add .PLAN.md`.
+
+A file that already contains raw git conflict markers (a merge done
+without the driver) is recovered with `plan resolve` (best-effort,
+lossier than `merge`; writes a `.reject` if conflicts remain).
 
 ---
 

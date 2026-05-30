@@ -72,10 +72,19 @@ def _remove_claude_md_section(content):
 def _handle_install(scope):
     """Install plan binary, Claude Code plugin, and CLAUDE.md instructions.
 
-    scope: 'local' (current directory) or 'user' (~/.local/bin + ~/.claude).
+    scope: 'local' (current directory), 'user' (~/.local/bin + ~/.claude), or
+    'git' (ONLY the git merge driver in the current repo — no binary/plugin/
+    CLAUDE.md).
     """
-    if scope not in ("local", "user"):
-        raise SystemExit("Error: install requires 'local' or 'user' argument")
+    if scope not in ("local", "user", "git"):
+        raise SystemExit(
+            "Error: install requires 'local', 'user', or 'git' argument")
+
+    # 'git' target: configure ONLY the merge driver in the current repo.
+    if scope == "git":
+        _install_merge_driver(strict=True)
+        print("Done.")
+        return
 
     script_path = os.path.abspath(__file__)
 
@@ -207,16 +216,92 @@ def _handle_install(scope):
             f.write(_CODEX_MD_SECTION)
         print(f"AGENTS.md: updated {agents_md_path}")
 
+    # --- Git merge driver (local scope only) ---
+    if scope == "local":
+        _install_merge_driver()
+
     print("Done.")
+
+
+_DRIVER_PLAN_FILE = ".PLAN.md"
+_DRIVER_REJECT_PATTERN = ".PLAN.md.reject"
+
+
+def _resolve_repo_root_or_skip(strict):
+    """Resolve the current git repo root, or signal "no repo".
+
+    Returns the repo root path, or None when the cwd is not a git repository
+    (or git is unavailable). When `strict` is True (the standalone `git` target,
+    whose ONLY job is the driver), a missing repo is a hard error
+    (SystemExit, non-zero exit); otherwise it is a silent skip (the `local`
+    target, where the driver is a bonus on top of a full install).
+    """
+    try:
+        return git_repo_root()
+    except (RuntimeError, OSError):
+        if strict:
+            raise SystemExit(
+                "Error: 'git' target requires a git repository "
+                "(run inside a git work tree)")
+        return None
+
+
+def _install_merge_driver(strict=False):
+    """Configure the structure-aware git merge driver in the current repo.
+
+    Adds `.PLAN.md merge=plan` to .gitattributes, sets merge.plan.* in the
+    repo's git config, and ignores the `.reject` sidecar. When `strict` is False
+    (the `local` target) a non-git cwd is a silent skip; when True (the `git`
+    target) it is a hard error.
+    """
+    repo_root = _resolve_repo_root_or_skip(strict)
+    if repo_root is None:
+        print("Merge driver: skipped (not a git repository)")
+        return
+
+    ensure_gitattributes(repo_root, _DRIVER_PLAN_FILE)
+    set_merge_driver(repo_root)
+    ensure_gitignore(repo_root, _DRIVER_REJECT_PATTERN)
+    print(f"Merge driver: configured in {repo_root}")
+    print(f"  .gitattributes: {_DRIVER_PLAN_FILE} merge=plan")
+    print(f"  git config: merge.plan.driver = {_MERGE_DRIVER_CMD}")
+    print(f"  .gitignore: {_DRIVER_REJECT_PATTERN}")
+
+
+def _uninstall_merge_driver(strict=False):
+    """Remove the structure-aware git merge driver config from the current repo.
+
+    Idempotent: removes the .gitattributes line, the merge.plan config section,
+    and the `.reject` .gitignore line; tolerates any being absent. When `strict`
+    is False (the `local` target) a non-git cwd is a silent skip; when True (the
+    `git` target) it is a hard error.
+    """
+    repo_root = _resolve_repo_root_or_skip(strict)
+    if repo_root is None:
+        print("Merge driver: skipped (not a git repository)")
+        return
+
+    remove_gitattributes(repo_root, _DRIVER_PLAN_FILE)
+    unset_merge_driver(repo_root)
+    remove_gitignore(repo_root, _DRIVER_REJECT_PATTERN)
+    print(f"Merge driver: removed from {repo_root}")
 
 
 def _handle_uninstall(scope):
     """Uninstall plan binary, Claude Code plugin, and CLAUDE.md instructions.
 
-    scope: 'local' (current directory) or 'user' (~/.local/bin + ~/.claude).
+    scope: 'local' (current directory), 'user' (~/.local/bin + ~/.claude), or
+    'git' (ONLY the git merge driver in the current repo).
     """
-    if scope not in ("local", "user"):
-        raise SystemExit("Error: uninstall requires 'local' or 'user' argument")
+    if scope not in ("local", "user", "git"):
+        raise SystemExit(
+            "Error: uninstall requires 'local', 'user', or 'git' argument")
+
+    # 'git' target: remove ONLY the merge driver from the current repo.
+    if scope == "git":
+        _uninstall_merge_driver(strict=True)
+        print("Done.")
+        return
 
     # --- Binary ---
     if scope == "local":
@@ -387,4 +472,8 @@ def _handle_uninstall(scope):
             print(f"AGENTS.md: no task tracking section found")
     else:
         print(f"AGENTS.md: not found at {agents_md_path}")
+
+    # --- Git merge driver (local scope only) ---
+    if scope == "local":
+        _uninstall_merge_driver()
 

@@ -329,16 +329,43 @@ plan 5                           # Read it
 plan 5 close                     # Done
 ```
 
-### Merge conflicts
+### Merging branches
 
-When `git merge` or `git rebase` creates conflicts in `.PLAN.md`:
+`.PLAN.md` is a single file, so two branches that both change it must be
+reconciled. `plan merge` does this structurally — per ticket/comment, by
+ID — which a line-based merge cannot.
 
 ```bash
-plan resolve
+plan merge main                  # structure-aware three-way merge into the working tree
+plan merge main --check          # dry run: report the conflict count, write nothing
 ```
 
-This resolves conflicts intelligently: timestamps pick the newer value,
-IDs are merged correctly, structure is preserved.
+A clean merge writes the result and exits 0. On conflicts it writes the
+auto-merged result (your side kept, so the file stays valid) plus a
+`.PLAN.md.reject`, and exits non-zero. Edit the `.reject` (keep exactly
+one side per block — do not edit the content), then finish:
+
+```bash
+plan merge --resolve             # apply your edits and finish
+plan merge --abort               # or discard the whole merge
+plan merge main --prefer to      # or take your side on every conflict, no .reject
+```
+
+This resolves conflicts intelligently: timestamps pick the right value,
+colliding IDs are renumbered and references rewritten, structure is
+preserved.
+
+**Git merge driver.** `plan install local` (or `plan install git`, which
+configures *only* the driver) sets up a git merge driver for the repo, so a
+plain `git merge` / `git rebase` reconciles `.PLAN.md` automatically; on
+conflict git leaves a `.reject` to finish with `plan merge --resolve` then
+`git add`. Remove it with `plan uninstall git`.
+
+**Recovering raw markers.** If `.PLAN.md` already has raw git conflict
+markers (a merge done without the driver), `plan resolve` is the
+best-effort recovery: it reconstructs both sides from the markers and
+merges structurally, leaving a `.reject` if conflicts remain. It is
+lossier than `merge` — prefer `plan merge` or the installed driver.
 
 ### Validation
 

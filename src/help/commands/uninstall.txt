@@ -3,7 +3,13 @@ plan uninstall — Remove plan binary, plugin, and instruction sections
 Usage:
   plan uninstall local    Remove from current directory / project
   plan uninstall user     Remove from ~/.local/bin and ~/.claude
+  plan uninstall git       Remove ONLY the git merge driver from this repo
 
 Removes the binary, plugin directory, settings.json registration, and
 the task tracking section from CLAUDE.md and AGENTS.md. Empty files
 and directories are cleaned up.
+
+'local' and 'git' also remove the .PLAN.md merge driver config from the
+current repo (.gitattributes line, merge.plan git config section, and the
+'.PLAN.md.reject' .gitignore line). The 'git' target removes ONLY that
+driver config and must be run inside a git repository.

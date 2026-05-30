@@ -32,12 +32,15 @@ Commands are standalone operations — they must be the first word.
 | `edit` | `edit ID [-r]` | Edit ticket in `$EDITOR` |
 | `check` | `check` | Validate document structure |
 | `fix` | `fix` | Auto-repair document |
-| `resolve` | `resolve` | Resolve git merge conflicts |
-| `install` | `install local\|user` | Install binary, plugin, CLAUDE.md |
-| `uninstall` | `uninstall local\|user` | Remove installation |
+| `merge` | `merge <branch> [--resolve\|--abort\|--check]` | Structure-aware three-way merge of the plan file |
+| `resolve` | `resolve` | Recover a file with raw git conflict markers |
+| `install` | `install local\|user\|git` | Install binary, plugin, CLAUDE.md (and git merge driver for `local`); `git` = merge driver only |
+| `uninstall` | `uninstall local\|user\|git` | Remove installation (`git` = merge driver only) |
 | `help` | `help [TOPIC]` | Show help (`help dsl` for expressions) |
 
 See [Commands In-Depth](commands.md) for detailed documentation of each command.
+
+`merge-driver` (`merge-driver %O %A %B %P`) is the internal git merge driver — git calls it automatically when configured by `install local` or `install git`. You do not run it directly.
 
 ## Verbs
 

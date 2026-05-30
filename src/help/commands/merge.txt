@@ -1,0 +1,108 @@
+plan merge — Structure-aware three-way merge of the plan file
+
+Usage:
+  plan merge <branch> [--renumber to|from] [--prefer to|from]
+                      [--stage|--no-stage] [--no-edit]
+  plan merge <branch> --check
+  plan merge [--to SRC] --from SRC [--base SRC] [-o OUT] [flags]
+  plan merge --resolve [-o OUT]
+  plan merge --abort   [-o OUT]
+
+Merges the plan file from <branch> into the current branch using a
+structural three-way merge (base = merge-base, 'to' = current branch,
+'from' = <branch>). It merges per ticket/comment and per field by
+identity (ID), not by file position, so it reconciles changes that a
+line-based merge cannot.
+
+Explicit sources: instead of a positional <branch> (shorthand for
+'--from <branch>'), name each side with --to / --from / --base. A SRC is:
+  git:<ref>     a git commit/ref (requires a repo)
+  file:<path>   a filesystem path
+  <bare>        auto: an existing path is a file, else a git ref
+'--to' defaults to the working-tree plan file; '--base' is optional —
+when omitted, a merge-base is auto-computed if both sides are commits,
+otherwise a (lossy) two-way merge is used. With explicit file sources
+this works entirely OUTSIDE a git repo. Use -o/--output OUT to write the
+result elsewhere (default: the --to file, or the discovered plan file);
+the in-progress state then lives in '<OUT>.reject' + '<dir>/.plan-merge',
+so '--resolve -o OUT' / '--abort -o OUT' finish it with or without git.
+
+The two sides are 'to' (the side merged INTO — your current branch, kept
+canonical) and 'from' (the side merged FROM — <branch>). The auto-merged
+result is always written to the plan file and is always valid: at each
+unresolved conflict the 'to' (your) side is kept, so the file stays
+usable even before you resolve. Tickets/comments created independently
+on both sides with the same ID are renumbered (the incoming 'from' side
+by default) and every reference (links, parent nesting, #N mentions) is
+rewritten.
+
+If genuine conflicts remain, a '<planfile>.reject' sidecar is written
+listing the conflicting blocks and the command exits non-zero. Edit the
+sidecar (keep one side per block — see below), then run
+'plan merge --resolve'.
+
+Modes:
+  <branch>          Merge <branch> into the working-tree plan file.
+  --check           Dry run: compute the merge, print the conflict
+                    count, write nothing. Exits non-zero if conflicts.
+  --resolve         Apply the edited '<planfile>.reject' and finish.
+  --abort           Discard an in-progress merge (restore the pre-merge
+                    plan file) and remove the '.reject'.
+
+Flags:
+  --to SRC                 The side merged INTO (default: working-tree
+                           plan file). git:<ref> | file:<path> | bare.
+  --from SRC               The side merged FROM (required). A positional
+                           <branch> is shorthand for --from <branch>.
+  --base SRC               Explicit merge base (forces three-way). When
+                           omitted: auto merge-base for commit sides,
+                           else two-way.
+  -o, --output OUT         Write the merged result to OUT (default: the
+                           --to file, else the discovered plan file).
+  --renumber to|from       Which side's colliding new IDs get reassigned
+                           (default: from).
+  --prefer to|from         Auto-resolve ALL conflicts to one side; no
+                           '.reject' is written.
+  --stage / --no-stage     Whether to mark the plan file unmerged in the
+                           git index. Standalone default is file-only
+                           (index untouched); inside a real git
+                           merge/rebase the index is handled
+                           automatically. No-op outside a git repo.
+  --no-edit                Do not auto-launch $EDITOR on the '.reject'.
+
+Resolving the .reject file:
+  Each block shows '--- to (<branch>) ---' and
+  '--- from (<branch>) ---'. Keep EXACTLY ONE side: delete the other
+  side entirely, or delete a side's indicator line and leave only its
+  content. Do NOT edit the content — only choose a side. A side whose
+  content is <DELETED> removes the entry. Do not edit the '#' header or
+  the '<<<' / '>>>' lines. Then run 'plan merge --resolve' (or
+  'plan merge --abort' to discard).
+
+Git merge driver:
+  'plan install local' configures a git merge driver for the repo, so a
+  plain 'git merge' / 'git rebase' / 'cherry-pick' / 'stash pop'
+  reconciles the plan file automatically. On conflict git leaves the
+  file unmerged plus a '.reject'; finish with 'plan merge --resolve'
+  then 'git add'. ('plan merge-driver' is the internal entry git calls;
+  you do not run it directly.)
+
+Exit codes:
+  0   merged cleanly, or --resolve succeeded
+  1   conflicts need action (.reject written), or --check found conflicts
+  2   error (bad branch, parse failure, edited/unresolved blocks, or no
+      merge in progress for --resolve / --abort)
+
+Examples:
+  plan merge main                    Merge main into the current branch
+  plan merge main --check            Report conflicts without writing
+  plan merge main --prefer to        Take your side on every conflict
+  plan merge --from v1.0:.PLAN.md    Merge a plan as of a tag (git: ref)
+  plan merge --to a.md --from b.md -o out.md
+                                     Merge two files outside git into out.md
+  plan merge --resolve -o out.md     Finish an out.md merge (no git needed)
+  plan merge --resolve               Apply edits from the .reject file
+  plan merge --abort                 Discard the in-progress merge
+
+See 'plan help resolve' for recovering a file that already contains raw
+git conflict markers (a driver-less merge).

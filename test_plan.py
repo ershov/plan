@@ -3867,53 +3867,6 @@ class TestCheckFix(unittest.TestCase):
         self.assertNotIn(999, links.get("blocked", []))
 
 
-class TestResolve(unittest.TestCase):
-    """Test resolve command."""
-
-    def test_resolve_no_conflicts(self):
-        output = []
-        result = plan._handle_resolve(None, output, raw_text=SAMPLE_DOC)
-        self.assertIsNone(result)
-        self.assertTrue(any("OK" in o for o in output))
-
-    def test_resolve_timestamp_conflict(self):
-        text = textwrap.dedent("""\
-        # P {#project}
-
-        ## Metadata {#metadata}
-
-            next_id: 2
-
-        ## Tickets {#tickets}
-
-        * ## Ticket: Task: T1 {#1}
-
-        <<<<<<< HEAD
-              updated: 2024-01-01 00:00:00 UTC
-              status: open
-        =======
-              updated: 2024-06-01 00:00:00 UTC
-              status: in-progress
-        >>>>>>> branch
-        """)
-        output = []
-        result = plan._handle_resolve(None, output, raw_text=text)
-        self.assertIsNotNone(result)
-        # Should pick the newer timestamp
-        self.assertIn("2024-06-01", result)
-        self.assertTrue(any("Resolved" in o for o in output))
-
-    def test_resolve_preserves_indentation(self):
-        text = "<<<<<<< HEAD\n      status: open\n=======\n      status: closed\n>>>>>>> b\n"
-        output = []
-        result = plan._handle_resolve(None, output, raw_text=text)
-        self.assertIsNotNone(result)
-        # Indentation should be preserved
-        for line in result.split('\n'):
-            if 'status' in line:
-                self.assertTrue(line.startswith('      '))
-
-
 class TestBatchMode(unittest.TestCase):
     """Test batch/semicolon-separated operations."""
 

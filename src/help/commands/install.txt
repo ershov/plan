@@ -3,6 +3,7 @@ plan install — Install plan binary, Claude Code plugin, and instructions
 Usage:
   plan install local    Install into current directory / project
   plan install user     Install into ~/.local/bin and ~/.claude
+  plan install git       Configure ONLY the git merge driver in this repo
 
 What gets installed:
   Binary     'local': ./plan, 'user': ~/.local/bin/plan
@@ -16,3 +17,11 @@ What gets installed:
   AGENTS.md  'local': ./AGENTS.md (Codex)
              'user': ~/.codex/instructions.md
              Appends task tracking instructions. Skipped if already present.
+  Merge      'local' and 'git': configure the .PLAN.md merge driver in the
+  driver     current repo — adds '.PLAN.md merge=plan' to .gitattributes, sets
+             merge.plan.driver in git config, and ignores '.PLAN.md.reject'.
+             'user' does not touch any repo.
+
+The 'git' target installs ONLY the merge driver (no binary, plugin, or
+CLAUDE.md/AGENTS.md). It must be run inside a git repository; otherwise it
+exits with an error.

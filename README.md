@@ -78,6 +78,8 @@ plan [selectors] [verb] [args] [; ...]
 
 Common operations: `create`, `list`, `get`, `status`, `close`, `move`, `edit`, `link`, `comment add`. Filter with `-q`, recurse with `-r`, format output with `--format`.
 
+Because `.PLAN.md` is a single file, `plan merge <branch>` reconciles diverged copies structurally (by ticket/comment ID, not line position); `plan install local` configures a git merge driver so `git merge`/`git rebase` do this automatically. See [Git integration](doc/workflows.md#git-integration-workflow).
+
 See the [CLI reference](doc/cli-reference.md) for the full list of verbs, selectors, flags, and DSL expressions. See [examples](doc/examples.md) for copy-paste recipes.
 
 ## Terminal UI
@@ -109,17 +111,24 @@ For user-wide installation (binary to `~/.local/bin/`, plugin + CLAUDE.md to `~/
 plan install user
 ```
 
-This installs three things:
+For just the git merge driver in the current repo (no binary/plugin/CLAUDE.md):
+
+```bash
+plan install git
+```
+
+This installs:
 - **Binary** — copies `plan` to the target location (skipped if already on PATH)
 - **Plugin** — skills and a SessionStart hook that shows ticket status on every session
 - **CLAUDE.md** — task tracking instructions that enforce the `plan` workflow
+- **Git merge driver** (`local` and `git`) — so `git merge`/`git rebase` reconcile `.PLAN.md` structurally and automatically (see [Git integration](doc/workflows.md#git-integration-workflow)). The `git` target installs *only* this driver and must run inside a git repo.
 
 Restart Claude Code after installing.
 
 To uninstall:
 
 ```bash
-plan uninstall local   # or: plan uninstall user
+plan uninstall local   # or: plan uninstall user, plan uninstall git
 ```
 
 ### Usage

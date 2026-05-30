@@ -151,31 +151,66 @@ Automatically fixes common issues found by `check`:
 - Removes broken links
 - Repairs other structural problems
 
-## resolve — Resolve Merge Conflicts
+## merge — Structure-Aware Three-Way Merge
+
+```bash
+plan merge <branch> [--renumber to|from] [--prefer to|from] \
+                    [--stage|--no-stage] [--no-edit]
+plan merge <branch> --check     # dry run: report conflict count, write nothing
+plan merge --resolve            # apply the edited .reject and finish
+plan merge --abort              # discard an in-progress merge
+```
+
+Merges the plan file from `<branch>` into the current branch using a structural three-way merge (base = merge-base, `to` = current branch, `from` = `<branch>`). The two sides are **`to`** (the side merged *into* — your current branch, kept canonical) and **`from`** (the side merged *from* — `<branch>`). Tickets and comments are merged by identity (ID), per field, not by file position — so it reconciles changes a line-based merge cannot, including tickets created independently on both branches that happen to share an ID (those are renumbered and every reference is rewritten).
+
+The auto-merged result is always written to `.PLAN.md` and is always valid: at each unresolved conflict the **`to`** (your) side is kept. If genuine conflicts remain, a `<planfile>.reject` sidecar is written and the command exits non-zero.
+
+| Flag | Description |
+|------|-------------|
+| `--renumber to\|from` | Which side's colliding new IDs get reassigned (default: `from`) |
+| `--prefer to\|from` | Auto-resolve **all** conflicts to one side; no `.reject` |
+| `--stage` / `--no-stage` | Mark the plan file unmerged in the git index; standalone default is file-only |
+| `--no-edit` | Do not auto-launch `$EDITOR` on the `.reject` |
+
+**Resolving the `.reject` file.** Each conflict block shows `--- to (<branch>) ---` and `--- from (<branch>) ---`. Keep exactly one side (delete the other, or delete a side's indicator line and leave only its content). Do not edit the content — only choose a side. A side whose content is `<DELETED>` removes the entry. Then run `plan merge --resolve`.
+
+**Git merge driver.** `plan install local` configures a git merge driver for the repo, so a plain `git merge` / `git rebase` / `cherry-pick` / `stash pop` reconciles `.PLAN.md` automatically. On conflict git leaves the file unmerged plus a `.reject`; finish with `plan merge --resolve` then `git add`. (`merge-driver` is the internal entry git calls — you do not run it directly.)
+
+**Exit codes:** `0` = clean / resolved; `1` = conflicts need action (or `--check` found conflicts); `2` = error.
+
+See [Merging Branches](workflows.md#git-integration-workflow) for the full workflow.
+
+## resolve — Recover Raw Conflict Markers
 
 ```bash
 plan resolve
 ```
 
-Parses git merge conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) in the plan file and produces a clean merged document. Useful when multiple people or agents are editing `.PLAN.md` concurrently.
+Best-effort recovery for a plan file that already contains raw git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) — i.e. a merge done **without** the git merge driver. It reconstructs both sides from the markers and runs a structure-aware merge (three-way if diff3 `|||||||` base markers are present, otherwise a lossier two-way merge that cannot distinguish add from delete). The markers are removed and the auto-merged result written, defaulting unresolved conflicts to your side; if conflicts remain, a `.reject` is written so you can finish with `plan merge --resolve`.
+
+This is the degraded cousin of [`merge`](#merge--structure-aware-three-way-merge) — prefer `plan merge <branch>`, or install the merge driver with `plan install local` so merges reconcile automatically.
 
 ## install — Install Binary, Plugin, and CLAUDE.md
 
 ```bash
 plan install local    # Into current directory / project
 plan install user     # Into ~/.local/bin and ~/.claude
+plan install git      # ONLY the git merge driver, in the current repo
 ```
 
-See [Installation](installation.md) for full details on what gets installed.
+See [Installation](installation.md) for full details on what gets installed. For `local`, `install` also configures the [git merge driver](#merge--structure-aware-three-way-merge) for the repo (adds `.PLAN.md merge=plan` to `.gitattributes`, sets `merge.plan.driver` in git config, and ignores the `.reject` sidecar) so plain `git merge`/`git rebase` reconcile `.PLAN.md` automatically.
+
+`plan install git` configures **only** that merge driver — no binary, plugin, or `CLAUDE.md`/`AGENTS.md`. Use it when `plan` is already on your PATH and you just want a repo's `.PLAN.md` to merge structurally. It must be run inside a git repository; outside one it exits with an error.
 
 ## uninstall — Remove Installation
 
 ```bash
 plan uninstall local
 plan uninstall user
+plan uninstall git    # Remove only the repo's git merge driver config
 ```
 
-Removes the binary, plugin directory, plugin registration from `settings.json`, and the task tracking section from `CLAUDE.md`.
+Removes the binary, plugin directory, plugin registration from `settings.json`, and the task tracking section from `CLAUDE.md`. For `local` and `git`, it also removes the git merge driver config (the `.gitattributes` line, the `merge.plan` git config section, and the `.reject` `.gitignore` line). `plan uninstall git` removes **only** that driver config.
 
 ## help — Show Help
 

@@ -242,15 +242,71 @@ plan list ready    # Active, no blockers, no active children
 
 ## Git Integration Workflow
 
-### Merge Conflict Resolution
+### Merging a Branch
 
-When `.PLAN.md` has merge conflicts:
+`.PLAN.md` is a single file, so when two branches both change it the copies must be reconciled. `plan merge` does this structurally (per ticket/comment, by ID), which a line-based merge cannot.
+
+**Automatic (recommended).** Once `plan install local` has configured the git merge driver, a plain merge or rebase reconciles `.PLAN.md` for you:
 
 ```bash
-plan resolve      # Auto-resolve merge conflicts
-plan check        # Validate the result
-plan fix          # Auto-repair if needed
+plan install local           # one-time: configures the merge driver for the repo
+git merge main               # .PLAN.md is merged structurally and automatically
 ```
+
+If git reports a conflict, it leaves `.PLAN.md` merged-to-your-side plus a `.PLAN.md.reject`; finish with:
+
+```bash
+plan merge --resolve         # apply the edits you make to the .reject
+git add .PLAN.md             # mark it resolved for git
+```
+
+**Manual.** Without the driver (or to merge a branch without a full `git merge`):
+
+```bash
+plan merge main              # structure-aware three-way merge into the working tree
+plan merge main --check      # or: dry run — report the conflict count, write nothing
+```
+
+A clean merge writes the result and exits 0. On conflicts it writes the auto-merged result (your side kept) plus `.PLAN.md.reject`, and exits non-zero.
+
+### Resolving the `.reject` File
+
+When conflicts remain, edit `.PLAN.md.reject`. Each block looks like:
+
+```
+<<< PLAN-CONFLICT id=1 type=field node=#12 field=status ...
+--- to (feature-x) ---
+in-progress
+--- from (main) ---
+done
+>>> END id=1
+```
+
+Keep **exactly one** side per block — delete the other side, or delete a side's indicator line and leave only its content. Do not edit the content (only choose a side); a side whose content is `<DELETED>` removes the entry. Then:
+
+```bash
+plan merge --resolve         # apply your edits and finish
+plan merge --abort           # or: discard the whole merge instead
+```
+
+To take one side everywhere without editing, use `--prefer`:
+
+```bash
+plan merge main --prefer to      # keep your side on every conflict
+plan merge main --prefer from    # take the incoming side on every conflict
+```
+
+### Recovering Raw Conflict Markers
+
+If `.PLAN.md` ended up with raw git conflict markers (`<<<<<<<` / `=======` / `>>>>>>>`) — a merge done without the driver — `resolve` is the best-effort recovery:
+
+```bash
+plan resolve      # reconstruct both sides from the markers and merge structurally
+plan check        # validate the result
+plan fix          # auto-repair if needed
+```
+
+`resolve` is lossier than `merge` (without a merge-base it cannot always distinguish add from delete). If conflicts remain it writes a `.reject` to finish with `plan merge --resolve`. Prefer `plan merge` or the installed driver.
 
 ### Validate Before Committing
 

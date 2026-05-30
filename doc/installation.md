@@ -41,6 +41,7 @@ This creates:
 | Binary | `./plan` | CLI executable (skipped if `plan` is already on PATH) |
 | Plugin | `.claude/plugins/claude-plan/` | Claude Code skills and hooks |
 | CLAUDE.md | `./CLAUDE.md` | Appends task tracking instructions (skipped if already present) |
+| Git merge driver | repo `.gitattributes`, git config, `.gitignore` | Reconciles `.PLAN.md` automatically on `git merge`/`rebase` |
 
 Use this method when you want `plan` integrated into a specific project's Claude Code setup.
 
@@ -61,6 +62,22 @@ This creates:
 | CLAUDE.md | `~/.claude/CLAUDE.md` | Appends task tracking instructions (skipped if already present) |
 
 Use this method when you want `plan` available in all projects with Claude Code.
+
+### Method 4: Merge Driver Only (`plan install git`)
+
+Configures **only** the structure-aware git merge driver in the current repository — no binary, plugin, or `CLAUDE.md`/`AGENTS.md`:
+
+```bash
+python3 plan.py install git
+```
+
+This adds:
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Git merge driver | repo `.gitattributes`, git config, `.gitignore` | Reconciles `.PLAN.md` automatically on `git merge`/`rebase` |
+
+Use this method when `plan` is already on your PATH (or installed user-wide) and you just want a particular repo's `.PLAN.md` to merge structurally. It must be run **inside a git repository**; outside one it exits with an error. `plan uninstall git` removes the same three driver artifacts.
 
 ## What Gets Installed
 
@@ -83,6 +100,16 @@ The plugin is registered in the corresponding `settings.json`.
 ### CLAUDE.md Instructions
 
 A section is appended to your `CLAUDE.md` with task tracking instructions. This tells Claude Code to use `plan` instead of TodoWrite/TaskCreate for task management. A marker prevents duplicate appends on re-install.
+
+### Git Merge Driver (`local` and `git`)
+
+`plan install local` and `plan install git` configure a structure-aware git merge driver for the repo so that `git merge` / `git rebase` / `cherry-pick` / `stash pop` reconcile `.PLAN.md` automatically (by ticket/comment ID, not line position). (`plan install git` configures **only** this driver; `plan install user` is global and does not touch any repo.) It is idempotent and adds:
+
+- `.PLAN.md merge=plan` to `.gitattributes`
+- `merge.plan.driver` (= `plan merge-driver %O %A %B %P`) to the repo's git config
+- `.PLAN.md.reject` to `.gitignore`
+
+On conflict, git leaves `.PLAN.md` merged-to-your-side plus a `.PLAN.md.reject`; finish with `plan merge --resolve` then `git add .PLAN.md`. See [Git integration](workflows.md#git-integration-workflow) and the [`merge` command](commands.md#merge--structure-aware-three-way-merge).
 
 ## Verifying Installation
 
@@ -109,9 +136,10 @@ plan 1 del
 ```bash
 plan uninstall local   # Remove project-local installation
 plan uninstall user    # Remove user-wide installation
+plan uninstall git     # Remove only the repo's git merge driver config
 ```
 
-This removes the binary, plugin directory, plugin registration from `settings.json`, and the task tracking section from `CLAUDE.md`.
+This removes the binary, plugin directory, plugin registration from `settings.json`, and the task tracking section from `CLAUDE.md`. For `local` and `git`, it also removes the git merge driver config (the `.gitattributes` line, the `merge.plan` git config section, and the `.reject` `.gitignore` line). `plan uninstall git` removes **only** that driver config and must be run inside a git repository.
 
 ## Next Steps
 
